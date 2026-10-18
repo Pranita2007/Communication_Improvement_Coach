@@ -1,3487 +1,1012 @@
 # ============================================================
-# COMMUNICATION IMPROVEMENT COACH
-# Complete Python Project
+# COMMUNICATION IMPROVEMENT COACH - COMPLETE UPDATED PROJECT
+# Python 3 | Tkinter GUI | SQLite | Whisper Speech-to-Text
 #
-# Features:
-# - Login / Register
-# - Proper Dashboard
-# - Voice Practice
-# - Selectable speaking timer (15 to 120 seconds)
-# - Microphone verification
-# - Voice -> Text
-# - Text analysis
-# - Grammar mistakes
-# - Corrections
-# - Vocabulary detection
-# - Communication score
-# - Text Practice
-# - Vocabulary Practice
-# - Grammar Practice
-# - Sentence Practice
-# - Daily Conversation
-# - Pronunciation Practice
-# - Progress Dashboard
-# - SQLite Database
+# Install in VS Code terminal:
+#   python -m pip install SpeechRecognition PyAudio
+#   python -m pip install openai-whisper
+#   python -m pip install matplotlib
+#
+# Whisper may require FFmpeg installed and available on PATH.
+# First Whisper use downloads the selected model (internet required).
 # ============================================================
 
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import ttk, messagebox
 import sqlite3
-import speech_recognition as sr
-import pyttsx3
 import random
 import re
 import threading
-import queue
+import hashlib
+import os
+import tempfile
+import wave
+import audioop
 from datetime import datetime
-import time
 
-# matplotlib is optional
 try:
-    import matplotlib.pyplot as plt
-    MATPLOTLIB_AVAILABLE = True
+    import speech_recognition as sr
 except ImportError:
-    MATPLOTLIB_AVAILABLE = False
+    sr = None
 
+try:
+    import whisper
+except ImportError:
+    whisper = None
 
-# ============================================================
-# SETTINGS
-# ============================================================
+try:
+    import matplotlib
+    matplotlib.use("TkAgg")
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+    HAS_MATPLOTLIB = True
+except ImportError:
+    HAS_MATPLOTLIB = False
 
+# ---------------- CONFIGURATION ----------------
 APP_TITLE = "Communication Improvement Coach"
+DB_FILE = "communication_coach.db"
 
-DB_NAME = "communication_coach.db"
-
-# Maximum speaking time
-MAX_SPEAKING_SECONDS = 30
-
-# User must start speaking within this time
-LISTEN_TIMEOUT = 10
-
-# Speech language
-SPEECH_LANGUAGE = "en-IN"
-
-
-# ============================================================
-# COLORS
-# ============================================================
-
-NAVY = "#17365D"
-BLUE = "#2874A6"
-LIGHT_BLUE = "#EAF3FA"
-VERY_LIGHT_BLUE = "#F4F8FC"
-
-GREEN = "#20A464"
-LIGHT_GREEN = "#E8F8F0"
-
-RED = "#D64545"
-LIGHT_RED = "#FDECEC"
-
-ORANGE = "#E67E22"
-LIGHT_ORANGE = "#FFF3E5"
-
+BG = "#F3F5FA"
+NAVY = "#202A44"
+PURPLE = "#6558D3"
 WHITE = "#FFFFFF"
-BLACK = "#202124"
-GREY = "#6B7280"
-LIGHT_GREY = "#E5E7EB"
-
-
-# ============================================================
-# GLOBAL VARIABLES
-# ============================================================
+GREEN = "#16865C"
+ORANGE = "#D97706"
+RED = "#C0392B"
+MUTED = "#667085"
 
 root = tk.Tk()
+root.title(APP_TITLE)
+root.geometry("1180x790")
+root.minsize(980, 650)
+root.configure(bg=BG)
 
-current_user = None
+current_user = {"name": ""}
+active_timer = {"job": None}
+quiz_state = {"page": 0, "selected": [], "answers": [], "score": 0}
+speech_topic_state = {"topic": ""}
 
-# Queue is used so microphone work does not freeze the GUI
-voice_queue = queue.Queue()
+# ---------------- DATABASE ----------------
+db = sqlite3.connect(DB_FILE)
+cur = db.cursor()
+cur.execute("""CREATE TABLE IF NOT EXISTS users (
+    username TEXT PRIMARY KEY, password TEXT NOT NULL, created_at TEXT
+)""")
+cur.execute("PRAGMA table_info(users)")
+user_columns = [row[1] for row in cur.fetchall()]
+if "created_at" not in user_columns:
+    cur.execute("ALTER TABLE users ADD COLUMN created_at TEXT")
+if "username" not in user_columns:
+    raise RuntimeError("Existing users table has no username column.")
+if "password" not in user_columns:
+    raise RuntimeError("Existing users table has no password column.")
 
-# Prevent multiple recordings at the same time
-recording_in_progress = False
+cur.execute("""CREATE TABLE IF NOT EXISTS progress (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL, activity TEXT NOT NULL,
+    score INTEGER NOT NULL, date TEXT NOT NULL,
+    improvement_feedback TEXT DEFAULT ''
+)""")
+cur.execute("PRAGMA table_info(progress)")
+progress_columns = [row[1] for row in cur.fetchall()]
+if "improvement_feedback" not in progress_columns:
+    cur.execute("ALTER TABLE progress ADD COLUMN improvement_feedback TEXT DEFAULT ''")
+db.commit()
 
+# ---------------- DATA ----------------
+vocabulary = [
+("Abundant","Available in large quantities"),("Accurate","Correct and exact"),
+("Adapt","Adjust to a new situation"),("Admire","Respect or appreciate"),
+("Ambitious","Having strong goals"),("Ancient","Very old"),("Approach","A way of dealing with something"),
+("Benefit","An advantage or helpful result"),("Brave","Showing courage"),("Calm","Peaceful and relaxed"),
+("Capable","Able to do something"),("Careful","Taking care to avoid mistakes"),
+("Challenge","A difficult task"),("Clarify","Make something clear"),("Collaborate","Work together"),
+("Confident","Believing in your own ability"),("Consistent","Doing something regularly"),
+("Creative","Using imagination to make something new"),("Curious","Eager to learn"),
+("Decision","A choice made after thinking"),("Dedicated","Committed to a task"),
+("Demonstrate","Show how something works"),("Develop","Grow or improve"),
+("Efficient","Working well without wasting time"),("Encourage","Give support or confidence"),
+("Essential","Very important or necessary"),("Evaluate","Judge or assess something"),
+("Excellent","Extremely good"),("Expand","Make larger or increase"),
+("Experience","Knowledge gained by doing something"),("Flexible","Able to change easily"),
+("Fluent","Able to speak smoothly and easily"),("Focus","Give attention to something"),
+("Generous","Willing to give or share"),("Genuine","Real, honest, and sincere"),
+("Grateful","Feeling thankful"),("Improve","Make something better"),
+("Independent","Able to act without help"),("Innovative","Introducing new ideas"),
+("Inspire","Motivate someone"),("Knowledge","Information and understanding"),
+("Logical","Based on reason"),("Maintain","Keep in good condition"),
+("Motivate","Give someone a reason to act"),("Observe","Watch carefully"),
+("Opportunity","A chance to do something"),("Patient","Able to wait calmly"),
+("Persuade","Convince someone with reasons"),("Precise","Exact and accurate"),
+("Reliable","Can be trusted"),("Resilient","Able to recover from difficulty"),
+("Respect","Show consideration for others"),("Significant","Important or meaningful"),
+("Solution","An answer to a problem"),("Support","Help or encourage"),
+("Thoughtful","Showing care and consideration"),("Unique","Different from others"),
+("Valuable","Useful or worth a lot"),("Versatile","Useful in many different ways"),
+("Wisdom","Good judgement and understanding")
+]
 
-# ============================================================
-# DATABASE
-# ============================================================
+grammar_questions = [
+("She ___ to college every day.",["go","goes","going"],1),
+("They ___ playing cricket.",["is","am","are"],2),
+("I ___ a student.",["is","am","are"],1),
+("He has ___ apple.",["a","an","the"],1),
+("We ___ finished our work.",["has","have","is"],1),
+("She ___ not like tea.",["do","does","are"],1),
+("The sun ___ in the east.",["rise","rises","rising"],1),
+("I went ___ school.",["to","at","on"],0),
+("There ___ five books.",["is","are","am"],1),
+("He is taller ___ me.",["than","then","that"],0),
+("I ___ English now.",["study","am studying","studied"],1),
+("They have lived here ___ 2020.",["for","since","from"],1),
+("She can ___ fast.",["runs","running","run"],2),
+("Neither answer ___ correct.",["are","is","were"],1),
+("If I study, I ___ pass.",["will","would","was"],0),
+("I have ___ my homework.",["do","did","done"],2),
+("He ___ yesterday.",["come","came","comes"],1),
+("The children ___ happy.",["is","are","was"],1),
+("Please listen ___ me.",["to","at","on"],0),
+("She speaks English ___.",["good","well","bestly"],1),
+("I am interested ___ music.",["on","at","in"],2),
+("This is ___ book.",["my","me","I"],0),
+("We ___ visit tomorrow.",["will","was","has"],0),
+("He did not ___.",["came","come","comes"],1),
+("There isn't ___ milk.",["many","much","few"],1),
+("Each student ___ a pen.",["have","has","are"],1),
+("I prefer tea ___ coffee.",["than","to","from"],1),
+("She was born ___ May.",["in","on","at"],0),
+("He arrived ___ 9 AM.",["in","on","at"],2),
+("The plural of child is ___.",["childs","children","childes"],1),
+("I ___ never seen it.",["has","have","was"],1),
+("She ___ cooking when I came.",["was","were","is"],0),
+("A group of students ___ here.",["are","is","were"],1),
+("The opposite of difficult is ___.",["easy","hard","tough"],0),
+("Please give it to ___.",["I","me","my"],1),
+("He is good ___ mathematics.",["in","at","on"],1),
+("I look forward to ___ you.",["meet","meeting","met"],1),
+("She ___ already left.",["have","has","are"],1),
+("We were tired, ___ we rested.",["so","because","although"],0),
+("He is ___ honest man.",["a","an","the"],1),
+("The train ___ before we arrived.",["leave","had left","leaves"],1),
+("I wish I ___ fly.",["can","could","will"],1),
+("You should ___ water.",["drink","drank","drinking"],0),
+("My friends ___ coming.",["is","are","am"],1),
+("She is the ___ student.",["good","better","best"],2),
+("I have been waiting ___ two hours.",["since","for","from"],1),
+("The news ___ surprising.",["are","is","were"],1),
+("He asked me ___ I was ready.",["if","what","which"],0),
+("This is the place ___ I live.",["where","who","whose"],0),
+("Let's ___ a break.",["take","takes","taking"],0)
+]
 
-def database_connection():
+daily_questions = [
+"Introduce yourself in English.","Describe your college.","What is your favourite hobby and why?",
+"Why is communication important?","Describe your daily routine.","What are your career goals?",
+"How do you handle a difficult situation?","Describe your favourite book.","What does teamwork mean to you?",
+"How can technology improve education?","Describe a person who inspires you.","What are your strengths?",
+"How do you manage your time?","What is cybersecurity?","Why do you want to learn English?",
+"Describe a memorable day.","How do you solve problems?","What makes a good leader?",
+"What did you learn this week?","What is your dream job?","How do you overcome fear?",
+"Why is reading useful?","Describe your favourite place.","What is artificial intelligence?",
+"How do you help your family?","What does success mean to you?","What would you change in your college?",
+"How do you learn new skills?","What is your biggest achievement?","How can students protect their data?",
+"Describe your favourite festival.","What makes a good friend?","Why should we respect others?",
+"How do you prepare for an exam?","What is your favourite subject?","How can we reduce pollution?",
+"What is the value of discipline?","Describe your ideal teacher.","How do you handle feedback?",
+"What is the importance of exercise?","How can you build confidence?","What is your plan for tomorrow?",
+"Describe a problem you solved.","What is the benefit of teamwork?","How do you stay motivated?",
+"Why is honesty important?","What skill would you like to master?","Describe a technology you use.",
+"How can you become a better speaker?","What advice would you give a friend?"
+]
 
-    return sqlite3.connect(DB_NAME)
+pronunciation_words = [
+"Entrepreneur","Pronunciation","Rural","Literature","Particularly","February","Hierarchy","Architecture",
+"Entrepreneurship","Miscellaneous","Colonel","Worcestershire","Sixth","Specific","Statistics","Comfortable",
+"Vegetable","Wednesday","Library","Jewellery","Receipt","Debt","Subtle","Queue","Choir","Anxiety",
+"Phenomenon","Onomatopoeia","Conscientious","Inconvenience","Preliminary","Exaggerate","Thorough",
+"Throughout","Strengths","Clothes","Months","World","Squirrel","Regularly","Necessary","Environment",
+"Development","Communication","Opportunity","Responsibility","Analysis","Certificate","Technology","Cybersecurity"
+]
 
+interview_questions = [
+"Tell me about yourself.","What are your greatest strengths?","What is one weakness you are improving?",
+"Why should we select you?","Why do you want this role?","What do you know about our organisation?",
+"Describe a challenge you overcame.","Tell me about a time you worked in a team.",
+"How do you handle pressure?","Where do you see yourself in five years?",
+"What motivates you?","How do you prioritise tasks?","Describe a mistake and what you learned.",
+"How do you accept feedback?","What does success mean to you?","Why should we hire a fresher?",
+"What skills make you suitable for this role?","How do you learn a new tool?",
+"Tell me about a project you completed.","What was your role in that project?",
+"What was the biggest project challenge?","How do you solve a problem you do not understand?",
+"How do you manage deadlines?","Do you prefer working alone or in a team?",
+"Describe a time you showed leadership.","How do you handle disagreement with a teammate?",
+"What are your short-term goals?","What are your long-term goals?","Why did you choose your course?",
+"What subject do you enjoy most and why?","What technical skills are you learning?",
+"Explain a technical concept in simple words.","How do you keep your skills updated?",
+"What is your proudest achievement?","What have you learned outside the classroom?",
+"How would your friends describe you?","What do you do when you do not know an answer?",
+"How do you respond to change?","How do you maintain quality in your work?",
+"Tell me about a time you solved a conflict.","What do you expect from a manager?",
+"What kind of workplace helps you do your best?","What makes you different from other candidates?",
+"How do you balance study and personal activities?","What is your preferred way to receive feedback?",
+"What would you do if you made an urgent mistake at work?",
+"How would you explain a gap in your knowledge?","What questions would you ask the interviewer?",
+"Are you willing to learn new responsibilities?","Is there anything else you would like us to know?"
+]
 
-def create_database():
+speaking_topics = [
+"Introduce yourself","Describe your college","Talk about your favourite subject","Describe your hobbies",
+"Talk about your family","Explain your career goal","Describe your future plans","How are you improving your English?",
+"Describe your daily routine","Talk about your best friend","Describe a memorable day","Explain why teamwork matters",
+"Talk about a technology you like","Describe your strengths","Explain your dream job"
+]
 
-    conn = database_connection()
-    cursor = conn.cursor()
+# ---------------- UI HELPERS ----------------
+def safe_after(func, *args):
+    try:
+        root.after(0, lambda: func(*args))
+    except tk.TclError:
+        pass
 
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS users (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT UNIQUE NOT NULL,
-            password TEXT NOT NULL
-        )
-    """)
-
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS results (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            username TEXT NOT NULL,
-            module TEXT NOT NULL,
-            score INTEGER NOT NULL,
-            feedback TEXT,
-            original_text TEXT,
-            corrected_text TEXT,
-            mistakes INTEGER DEFAULT 0,
-            date TEXT NOT NULL
-        )
-    """)
-
-    conn.commit()
-    conn.close()
-
-
-def save_result(
-    module,
-    score,
-    feedback="",
-    original_text="",
-    corrected_text="",
-    mistakes=0
-):
-
-    if current_user is None:
-        return
-
-    conn = database_connection()
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        INSERT INTO results
-        (
-            username,
-            module,
-            score,
-            feedback,
-            original_text,
-            corrected_text,
-            mistakes,
-            date
-        )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        current_user,
-        module,
-        int(score),
-        feedback,
-        original_text,
-        corrected_text,
-        int(mistakes),
-        datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    ))
-
-    conn.commit()
-    conn.close()
-
-
-# ============================================================
-# GENERAL GUI FUNCTIONS
-# ============================================================
-
-def clear_screen():
-
+def clear_page():
+    stop_timer()
     for widget in root.winfo_children():
         widget.destroy()
 
+def make_button(parent, text, command, color=PURPLE, width=None):
+    return tk.Button(parent, text=text, command=command, bg=color, fg=WHITE,
+        activebackground=color, activeforeground=WHITE, font=("Segoe UI", 10, "bold"),
+        relief="flat", bd=0, cursor="hand2", padx=13, pady=9, width=width)
 
-def make_button(
-    parent,
-    text,
-    command,
-    color=NAVY,
-    width=20,
-    height=1
-):
-
-    return tk.Button(
-        parent,
-        text=text,
-        command=command,
-        font=("Arial", 11, "bold"),
-        width=width,
-        height=height,
-        bg=color,
-        fg=WHITE,
-        activebackground=color,
-        activeforeground=WHITE,
-        relief="flat",
-        cursor="hand2"
-    )
-
-
-def page_title(parent, title, subtitle=None):
-
-    tk.Label(
-        parent,
-        text=title,
-        font=("Arial", 25, "bold"),
-        bg=parent.cget("bg"),
-        fg=NAVY
-    ).pack(pady=(20, 5))
-
+def page_heading(title, subtitle=""):
+    tk.Label(root, text=title, bg=BG, fg=NAVY,
+             font=("Segoe UI", 22, "bold")).pack(pady=(14, 3))
     if subtitle:
+        tk.Label(root, text=subtitle, bg=BG, fg=MUTED,
+                 font=("Segoe UI", 10)).pack(pady=(0, 8))
 
-        tk.Label(
-            parent,
-            text=subtitle,
-            font=("Arial", 12),
-            bg=parent.cget("bg"),
-            fg=GREY
-        ).pack(pady=(0, 15))
+def back_button(parent=root):
+    make_button(parent, "← Back to Dashboard", dashboard, NAVY).pack(pady=10)
 
+def make_improvement_advice(activity, score, notes=""):
+    if score >= 85:
+        level = "You are doing well. Keep practising regularly and aim for more natural, precise answers."
+    elif score >= 65:
+        level = "You have a good foundation. Review the mistakes shown and practise for 10 minutes daily."
+    else:
+        level = "Focus on the basics. Practise slowly, review examples, and repeat this activity before moving ahead."
+    if activity.lower().startswith("grammar"):
+        action = "Revise subject–verb agreement, tenses, articles, and prepositions. Write five example sentences for each weak rule."
+    elif activity.lower().startswith("vocabulary"):
+        action = "Review the word and meaning, say the word aloud, and use it in one original sentence. Revisit difficult words tomorrow."
+    elif activity.lower().startswith("pronunciation"):
+        action = "Break the word into syllables, listen to a trusted dictionary audio, repeat it slowly three times, then use it in a sentence."
+    else:
+        action = "Use complete sentences, organise your answer into a beginning, main point, and conclusion, and add one reason or example. Reduce filler words."
+    parts = [level, "Recommended next step: " + action]
+    if notes:
+        parts.append(notes)
+    return " ".join(parts)
 
-def create_back_button(parent):
+def save_progress(activity, score, feedback=None):
+    score = max(0, min(100, int(score)))
+    feedback = feedback or make_improvement_advice(activity, score)
+    cur.execute("INSERT INTO progress(username, activity, score, date, improvement_feedback) VALUES (?, ?, ?, ?, ?)",
+        (current_user["name"], activity, score, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), feedback))
+    db.commit()
 
-    tk.Button(
-        parent,
-        text="← Back to Dashboard",
-        command=dashboard,
-        font=("Arial", 10, "bold"),
-        bg=WHITE,
-        fg=NAVY,
-        relief="solid",
-        cursor="hand2"
-    ).pack(pady=15)
+def password_hash(password):
+    return hashlib.sha256(password.encode("utf-8")).hexdigest()
 
+def analyse_text(text, activity="Practice"):
+    words = re.findall(r"\b[\w'-]+\b", text)
+    lower = text.lower()
+    fillers = re.findall(r"\b(um|uh|erm|actually|basically|literally|like|you know)\b", lower)
+    issues = []
+    replacements = [
+        (r"\bi is\b", "I am"), (r"\bhe don't\b", "he doesn't"),
+        (r"\bshe don't\b", "she doesn't"), (r"\bi has\b", "I have"),
+        (r"\bhe have\b", "he has"), (r"\bshe have\b", "she has"),
+        (r"\bthey was\b", "they were"), (r"\bwe was\b", "we were"),
+        (r"\bi didn't went\b", "I didn't go"), (r"\bmore better\b", "better"),
+        (r"\bdiscuss about\b", "discuss"), (r"\breturn back\b", "return"),
+        (r"\byour welcome\b", "you're welcome")
+    ]
+    corrected = text
+    for pattern, replacement in replacements:
+        match = re.search(pattern, corrected, flags=re.I)
+        if match:
+            issues.append(f"Possible correction: '{match.group(0)}' → '{replacement}'")
+            corrected = re.sub(pattern, replacement, corrected, flags=re.I)
+    if text and text[-1] not in ".!?":
+        issues.append("Add suitable punctuation at the end.")
+        corrected = corrected.rstrip() + "."
+    if len(words) < 8:
+        issues.append("Try giving a longer answer with a reason or example.")
+    if fillers:
+        issues.append("Reduce filler words: " + ", ".join(sorted(set(fillers))))
+    if not issues:
+        issues.append("No obvious rule-based issue detected. Keep practising; this is not a full grammar checker.")
+    score = max(20, min(100, 75 + min(len(words), 50)//3 - len(fillers)*5 - len(issues)*2))
+    feedback = (
+        f"Activity: {activity}\nWords detected: {len(words)}\nFiller words: {len(fillers)}\n"
+        f"Estimated practice score: {score}/100\n\nFeedback:\n• " + "\n• ".join(issues) +
+        "\n\nCorrected / polished text:\n" + corrected +
+        "\n\nTeacher tip: Answer clearly, use complete sentences, and add one reason or example."
+    )
+    return score, feedback, corrected
 
-# ============================================================
-# WELCOME PAGE
-# ============================================================
+def show_feedback_page(title, feedback, activity, score, corrected=None):
+    clear_page()
+    page_heading(title, "Review your result, then return to the dashboard.")
+    box = tk.Text(root, wrap="word", font=("Segoe UI", 11), height=23, width=115)
+    box.pack(fill="both", expand=True, padx=24, pady=12)
+    box.insert("1.0", feedback)
+    box.configure(state="disabled")
+    make_button(root, "← Back to Dashboard", dashboard, NAVY).pack(pady=10)
 
+def stop_timer():
+    if active_timer["job"] is not None:
+        try:
+            root.after_cancel(active_timer["job"])
+        except tk.TclError:
+            pass
+        active_timer["job"] = None
+
+# ---------------- WELCOME / REGISTER / LOGIN ----------------
 def welcome_page():
-
-    clear_screen()
-
-    root.configure(bg=VERY_LIGHT_BLUE)
-
-    frame = tk.Frame(
-        root,
-        bg=VERY_LIGHT_BLUE
-    )
-
-    frame.pack(
-        fill="both",
-        expand=True
-    )
-
-    tk.Label(
-        frame,
-        text="COMMUNICATION",
-        font=("Arial", 40, "bold"),
-        bg=VERY_LIGHT_BLUE,
-        fg=NAVY
-    ).pack(pady=(100, 0))
-
-    tk.Label(
-        frame,
-        text="IMPROVEMENT COACH",
-        font=("Arial", 30, "bold"),
-        bg=VERY_LIGHT_BLUE,
-        fg=BLUE
-    ).pack(pady=5)
-
-    tk.Label(
-        frame,
-        text="Practice • Speak • Analyze • Improve",
-        font=("Arial", 16),
-        bg=VERY_LIGHT_BLUE,
-        fg=GREY
-    ).pack(pady=15)
-
-    tk.Label(
-        frame,
-        text=(
-            "Improve your English communication through\n"
-            "speaking, vocabulary, grammar and conversation practice."
-        ),
-        font=("Arial", 13),
-        bg=VERY_LIGHT_BLUE,
-        fg=BLACK,
-        justify="center"
-    ).pack(pady=10)
-
-    make_button(
-        frame,
-        "START PRACTICE",
-        login_page,
-        NAVY,
-        25,
-        2
-    ).pack(pady=30)
-
-    tk.Label(
-        frame,
-        text="Python • Tkinter • Speech Recognition • SQLite",
-        font=("Arial", 10),
-        bg=VERY_LIGHT_BLUE,
-        fg=GREY
-    ).pack(side="bottom", pady=20)
-
-
-# ============================================================
-# LOGIN
-# ============================================================
+    clear_page()
+    splash = tk.Frame(root, bg=NAVY)
+    splash.pack(fill="both", expand=True)
+    tk.Label(splash, text="WELCOME TO", bg=NAVY, fg="#C7D2FE",
+             font=("Segoe UI", 18, "bold")).pack(pady=(190, 8))
+    tk.Label(splash, text="COMMUNICATION IMPROVEMENT COACH", bg=NAVY, fg=WHITE,
+             font=("Segoe UI", 25, "bold"), wraplength=1000).pack(pady=8)
+    tk.Label(splash, text="Build confidence. Improve clarity. Communicate professionally.",
+             bg=NAVY, fg="#E5E7EB", font=("Segoe UI", 12)).pack(pady=10)
+    progress = ttk.Progressbar(splash, mode="indeterminate", length=280)
+    progress.pack(pady=22)
+    progress.start(10)
+    root.after(1800, login_page)
 
 def login_page():
-
-    clear_screen()
-
-    main = tk.Frame(
-        root,
-        bg=VERY_LIGHT_BLUE
-    )
-
-    main.pack(
-        fill="both",
-        expand=True
-    )
-
-    page_title(
-        main,
-        "LOGIN",
-        "Login to your Communication Coach"
-    )
-
-    card = tk.Frame(
-        main,
-        bg=WHITE,
-        padx=45,
-        pady=35,
-        relief="solid",
-        bd=1
-    )
-
-    card.pack()
-
-    tk.Label(
-        card,
-        text="Username",
-        font=("Arial", 12, "bold"),
-        bg=WHITE,
-        fg=BLACK
-    ).pack(anchor="w")
-
-    username = tk.Entry(
-        card,
-        font=("Arial", 13),
-        width=32
-    )
-
-    username.pack(pady=(5, 18))
-
-    tk.Label(
-        card,
-        text="Password",
-        font=("Arial", 12, "bold"),
-        bg=WHITE,
-        fg=BLACK
-    ).pack(anchor="w")
-
-    password = tk.Entry(
-        card,
-        font=("Arial", 13),
-        width=32,
-        show="*"
-    )
-
-    password.pack(pady=(5, 20))
-
-    def login():
-
-        global current_user
-
-        user = username.get().strip()
-        pwd = password.get().strip()
-
-        if not user or not pwd:
-
-            messagebox.showwarning(
-                "Missing Information",
-                "Please enter username and password."
-            )
-
-            return
-
-        conn = database_connection()
-        cursor = conn.cursor()
-
-        cursor.execute(
-            """
-            SELECT username
-            FROM users
-            WHERE username = ? AND password = ?
-            """,
-            (user, pwd)
-        )
-
-        result = cursor.fetchone()
-
-        conn.close()
-
-        if result:
-
-            current_user = user
-
-            dashboard()
-
-        else:
-
-            messagebox.showerror(
-                "Login Failed",
-                "Incorrect username or password."
-            )
-
-    make_button(
-        card,
-        "LOGIN",
-        login,
-        NAVY,
-        25
-    ).pack(pady=5)
-
-    tk.Button(
-        card,
-        text="Create New Account",
-        command=signup_page,
-        font=("Arial", 10, "bold"),
-        bg=WHITE,
-        fg=BLUE,
-        relief="flat",
-        cursor="hand2"
-    ).pack(pady=12)
-
-    tk.Button(
-        main,
-        text="← Back",
-        command=welcome_page,
-        font=("Arial", 10),
-        bg=VERY_LIGHT_BLUE,
-        relief="flat"
-    ).pack()
-
-
-# ============================================================
-# SIGNUP
-# ============================================================
-
-def signup_page():
-
-    clear_screen()
-
-    main = tk.Frame(
-        root,
-        bg=VERY_LIGHT_BLUE
-    )
-
-    main.pack(
-        fill="both",
-        expand=True
-    )
-
-    page_title(
-        main,
-        "CREATE ACCOUNT"
-    )
-
-    card = tk.Frame(
-        main,
-        bg=WHITE,
-        padx=45,
-        pady=35,
-        relief="solid",
-        bd=1
-    )
-
-    card.pack()
-
-    tk.Label(
-        card,
-        text="Username",
-        font=("Arial", 12, "bold"),
-        bg=WHITE
-    ).pack(anchor="w")
-
-    username = tk.Entry(
-        card,
-        font=("Arial", 13),
-        width=32
-    )
-
-    username.pack(pady=8)
-
-    tk.Label(
-        card,
-        text="Password",
-        font=("Arial", 12, "bold"),
-        bg=WHITE
-    ).pack(anchor="w")
-
-    password = tk.Entry(
-        card,
-        font=("Arial", 13),
-        width=32,
-        show="*"
-    )
-
-    password.pack(pady=8)
+    clear_page()
+    frame = tk.Frame(root, bg=WHITE, padx=45, pady=28,
+                     highlightthickness=1, highlightbackground="#D9DFEA")
+    frame.place(relx=0.5, rely=0.5, anchor="center")
+    tk.Label(frame, text="Communication Improvement Coach", bg=WHITE, fg=NAVY,
+             font=("Segoe UI", 21, "bold")).pack(pady=(0, 8))
+    tk.Label(frame, text="Sign in or create your own learner account. Multiple users are supported.",
+             bg=WHITE, fg=MUTED, font=("Segoe UI", 10)).pack(pady=(0, 16))
+    tk.Label(frame, text="Username", bg=WHITE, fg=NAVY,
+             font=("Segoe UI", 10, "bold")).pack(anchor="w")
+    username = tk.Entry(frame, font=("Segoe UI", 12), width=32, relief="solid", bd=1)
+    username.pack(pady=(4, 10), ipady=4)
+    tk.Label(frame, text="Password (minimum 4 characters)", bg=WHITE, fg=NAVY,
+             font=("Segoe UI", 10, "bold")).pack(anchor="w")
+    password = tk.Entry(frame, font=("Segoe UI", 12), width=32, show="*", relief="solid", bd=1)
+    password.pack(pady=(4, 10), ipady=4)
 
     def register():
-
-        user = username.get().strip()
-        pwd = password.get().strip()
-
-        if not user or not pwd:
-
-            messagebox.showwarning(
-                "Missing Information",
-                "Please enter username and password."
-            )
-
+        u, p = username.get().strip(), password.get()
+        if not u or not p:
+            messagebox.showwarning("Missing details", "Enter both a username and a password.", parent=root)
             return
-
+        if len(u) > 40 or any(ch.isspace() for ch in u):
+            messagebox.showwarning("Invalid username", "Use a username of up to 40 characters without spaces.", parent=root)
+            return
+        if len(p) < 4:
+            messagebox.showwarning("Password too short", "Choose a password with at least 4 characters.", parent=root)
+            return
         try:
-
-            conn = database_connection()
-            cursor = conn.cursor()
-
-            cursor.execute(
-                """
-                INSERT INTO users(username, password)
-                VALUES (?, ?)
-                """,
-                (user, pwd)
+            cur.execute("SELECT 1 FROM users WHERE username=?", (u,))
+            if cur.fetchone():
+                messagebox.showerror("Username already exists", "This username is already registered. Please choose another.", parent=root)
+                return
+            cur.execute("PRAGMA table_info(users)")
+            columns_info = cur.fetchall()
+            available_columns = {row[1] for row in columns_info}
+            values_by_column = {
+                "username": u, "name": u, "password": password_hash(p),
+                "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            insert_columns = [c for c in values_by_column if c in available_columns]
+            placeholders = ", ".join(["?"] * len(insert_columns))
+            cur.execute(
+                f"INSERT INTO users ({', '.join(insert_columns)}) VALUES ({placeholders})",
+                [values_by_column[c] for c in insert_columns]
             )
+            db.commit()
+            password.delete(0, "end")
+            messagebox.showinfo("Account created successfully",
+                f"The account for '{u}' has been created. You can now log in.", parent=root)
+            username.focus_set()
+        except sqlite3.Error as exc:
+            db.rollback()
+            messagebox.showerror("Registration error", f"The account could not be created.\n\nDetails: {exc}", parent=root)
 
-            conn.commit()
-            conn.close()
+    def login():
+        u, p = username.get().strip(), password.get()
+        if not u or not p:
+            messagebox.showwarning("Missing details", "Enter your username and password to log in.", parent=root)
+            return
+        try:
+            cur.execute("SELECT username FROM users WHERE username=? AND password=?", (u, password_hash(p)))
+            found = cur.fetchone()
+            if not found:
+                cur.execute("SELECT username FROM users WHERE username=? AND password=?", (u, p))
+                found = cur.fetchone()
+                if found:
+                    cur.execute("UPDATE users SET password=? WHERE username=?", (password_hash(p), u))
+                    db.commit()
+            if found:
+                current_user["name"] = found[0]
+                dashboard()
+            else:
+                messagebox.showerror("Login failed", "The username or password is incorrect. Create an account first if you are a new user.", parent=root)
+        except sqlite3.Error as exc:
+            messagebox.showerror("Login error", str(exc), parent=root)
 
-            messagebox.showinfo(
-                "Account Created",
-                "Your account was created successfully."
-            )
+    make_button(frame, "Login", login, GREEN).pack(fill="x", pady=(8, 5))
+    make_button(frame, "Create Account", register, PURPLE).pack(fill="x")
+    tk.Label(frame, text="Allow microphone access in Windows when using speaking practice.",
+             bg=WHITE, fg=MUTED, font=("Segoe UI", 9), wraplength=340).pack(pady=(13, 0))
+    username.bind("<Return>", lambda event: password.focus_set())
+    password.bind("<Return>", lambda event: login())
+    username.focus_set()
 
-            login_page()
-
-        except sqlite3.IntegrityError:
-
-            messagebox.showerror(
-                "Username Exists",
-                "This username already exists."
-            )
-
-    make_button(
-        card,
-        "CREATE ACCOUNT",
-        register,
-        GREEN,
-        25
-    ).pack(pady=20)
-
-    tk.Button(
-        main,
-        text="← Back to Login",
-        command=login_page,
-        bg=VERY_LIGHT_BLUE,
-        relief="flat"
-    ).pack()
-
-
-# ============================================================
-# DASHBOARD
-# ============================================================
-
+# ---------------- DASHBOARD ----------------
 def dashboard():
-
-    clear_screen()
-
-    root.configure(bg=VERY_LIGHT_BLUE)
-
-    # ---------------- Header ----------------
-
-    header = tk.Frame(
-        root,
-        bg=NAVY,
-        height=75
-    )
-
-    header.pack(
-        fill="x"
-    )
-
-    header.pack_propagate(False)
-
-    tk.Label(
-        header,
-        text="Communication Improvement Coach",
-        font=("Arial", 20, "bold"),
-        bg=NAVY,
-        fg=WHITE
-    ).pack(
-        side="left",
-        padx=25
-    )
-
-    tk.Label(
-        header,
-        text="Welcome, " + str(current_user),
-        font=("Arial", 11),
-        bg=NAVY,
-        fg=WHITE
-    ).pack(
-        side="right",
-        padx=25
-    )
-
-    # ---------------- Main ----------------
-
-    body = tk.Frame(
-        root,
-        bg=VERY_LIGHT_BLUE
-    )
-
-    body.pack(
-        fill="both",
-        expand=True
-    )
-
-    tk.Label(
-        body,
-        text="Learning Dashboard",
-        font=("Arial", 27, "bold"),
-        bg=VERY_LIGHT_BLUE,
-        fg=BLACK
-    ).pack(pady=(22, 3))
-
-    tk.Label(
-        body,
-        text="Choose a practice module",
-        font=("Arial", 13),
-        bg=VERY_LIGHT_BLUE,
-        fg=GREY
-    ).pack(pady=(0, 15))
-
-    # ---------------- Quick Progress ----------------
-
-    show_dashboard_summary(body)
-
-    # ---------------- Module Grid ----------------
-
-    grid = tk.Frame(
-        body,
-        bg=VERY_LIGHT_BLUE
-    )
-
-    grid.pack(pady=10)
-
-    modules = [
-
-        (
-            "🎤",
-            "Voice Practice",
-            "Speak and get detailed feedback",
-            voice_practice,
-            NAVY
-        ),
-
-        (
-            "📝",
-            "Text Practice",
-            "Type and analyze your English",
-            text_practice,
-            BLUE
-        ),
-
-        (
-            "📚",
-            "Vocabulary",
-            "Learn useful English words",
-            vocabulary_practice,
-            GREEN
-        ),
-
-        (
-            "📖",
-            "Grammar",
-            "Improve grammar knowledge",
-            grammar_practice,
-            ORANGE
-        ),
-
-        (
-            "✍",
-            "Sentence Practice",
-            "Build correct sentences",
-            sentence_practice,
-            BLUE
-        ),
-
-        (
-            "🗣",
-            "Conversation",
-            "Practice daily communication",
-            conversation_practice,
-            NAVY
-        ),
-
-        (
-            "🔊",
-            "Pronunciation",
-            "Listen and repeat words",
-            pronunciation_practice,
-            GREEN
-        ),
-
-        (
-            "📊",
-            "My Progress",
-            "View scores and improvement",
-            progress_page,
-            ORANGE
-        )
+    clear_page()
+    top = tk.Frame(root, bg=NAVY, height=76)
+    top.pack(fill="x")
+    tk.Label(top, text="🎓 Communication Mastery Coach", bg=NAVY, fg=WHITE,
+             font=("Segoe UI", 20, "bold")).pack(side="left", padx=24, pady=18)
+    tk.Label(top, text=f"Welcome, {current_user['name']}", bg=NAVY, fg=WHITE,
+             font=("Segoe UI", 11, "bold")).pack(side="right", padx=24)
+    tk.Label(root, text="Your Personal Communication Learning Dashboard", bg=BG, fg=NAVY,
+             font=("Segoe UI", 17, "bold")).pack(pady=(15, 2))
+    tk.Label(root, text="Choose a module, practise, submit, and review your feedback.",
+             bg=BG, fg=MUTED, font=("Segoe UI", 10)).pack(pady=(0, 9))
+    cur.execute("SELECT COUNT(*), COALESCE(ROUND(AVG(score)),0) FROM progress WHERE username=?",
+                (current_user["name"],))
+    total, avg = cur.fetchone()
+    metric = tk.Frame(root, bg=BG)
+    metric.pack(pady=4)
+    for label, value in [("Practice Sessions", total), ("Average Score", f"{avg}/100")]:
+        card = tk.Frame(metric, bg=WHITE, padx=22, pady=9)
+        card.pack(side="left", padx=8)
+        tk.Label(card, text=str(value), bg=WHITE, fg=PURPLE, font=("Segoe UI", 17, "bold")).pack()
+        tk.Label(card, text=label, bg=WHITE, fg=MUTED, font=("Segoe UI", 9)).pack()
+    grid = tk.Frame(root, bg=BG)
+    grid.pack(pady=10, expand=True)
+    items = [
+        ("🎤 Speaking Practice", speaking_page, "Speak, capture full transcript and analyse"),
+        ("📝 Grammar Practice", grammar_page, "50 questions in 5 sets of 10"),
+        ("📚 Vocabulary Builder", vocabulary_page, "60 words with simple meanings"),
+        ("❓ Daily Questions", questions_page, "20+ prompts with timer and feedback"),
+        ("🗣 Pronunciation", pronunciation_page, "50 difficult words to practise"),
+        ("💼 Interview Practice", interview_page, "50 common interview questions"),
+        ("📈 Daily Progress & Graph", progress_page, "Scores, history and chart")
     ]
-
-    row = 0
-    col = 0
-
-    for icon, title, description, command, color in modules:
-
-        card = tk.Frame(
-            grid,
-            bg=WHITE,
-            width=230,
-            height=125,
-            bd=1,
-            relief="solid"
-        )
-
-        card.grid(
-            row=row,
-            column=col,
-            padx=7,
-            pady=7
-        )
-
-        card.grid_propagate(False)
-
-        tk.Label(
-            card,
-            text=icon,
-            font=("Arial", 25),
-            bg=WHITE
-        ).pack(pady=(8, 0))
-
-        tk.Button(
-            card,
-            text=title,
-            font=("Arial", 11, "bold"),
-            bg=color,
-            fg=WHITE,
-            width=19,
-            relief="flat",
-            command=command,
-            cursor="hand2"
-        ).pack(pady=3)
-
-        tk.Label(
-            card,
-            text=description,
-            font=("Arial", 8),
-            bg=WHITE,
-            fg=GREY
-        ).pack()
-
-        col += 1
-
-        if col == 4:
-
-            col = 0
-            row += 1
-
-    # ---------------- Logout ----------------
-
-    tk.Button(
-        body,
-        text="Logout",
-        command=logout,
-        font=("Arial", 10, "bold"),
-        bg=LIGHT_RED,
-        fg=RED,
-        relief="flat",
-        width=15
-    ).pack(pady=8)
-
-
-# ============================================================
-# DASHBOARD SUMMARY
-# ============================================================
-
-def show_dashboard_summary(parent):
-
-    conn = database_connection()
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        SELECT COUNT(*), AVG(score)
-        FROM results
-        WHERE username = ?
-        """,
-        (current_user,)
-    )
-
-    result = cursor.fetchone()
-
-    conn.close()
-
-    attempts = result[0] or 0
-    average = round(result[1] or 0)
-
-    frame = tk.Frame(
-        parent,
-        bg=VERY_LIGHT_BLUE
-    )
-
-    frame.pack()
-
-    make_summary_card(
-        frame,
-        "PRACTICE SESSIONS",
-        str(attempts),
-        NAVY
-    ).grid(row=0, column=0, padx=8)
-
-    make_summary_card(
-        frame,
-        "AVERAGE SCORE",
-        f"{average}/100",
-        GREEN
-    ).grid(row=0, column=1, padx=8)
-
-    make_summary_card(
-        frame,
-        "SPEAKING LIMIT",
-        "Selectable",
-        ORANGE
-    ).grid(row=0, column=2, padx=8)
-
-
-def make_summary_card(parent, title, value, color):
-
-    card = tk.Frame(
-        parent,
-        bg=WHITE,
-        width=190,
-        height=75,
-        bd=1,
-        relief="solid"
-    )
-
-    card.grid_propagate(False)
-
-    tk.Label(
-        card,
-        text=title,
-        font=("Arial", 9, "bold"),
-        bg=WHITE,
-        fg=GREY
-    ).pack(pady=(8, 0))
-
-    tk.Label(
-        card,
-        text=value,
-        font=("Arial", 17, "bold"),
-        bg=WHITE,
-        fg=color
-    ).pack()
-
-    return card
-
-
-# ============================================================
-# VOICE PRACTICE
-# ============================================================
-
-def voice_practice():
-
-    clear_screen()
-
-    main = tk.Frame(
-        root,
-        bg=VERY_LIGHT_BLUE
-    )
-
-    main.pack(
-        fill="both",
-        expand=True
-    )
-
-    page_title(
-        main,
-        "🎤 Voice Communication Practice",
-        "Speak clearly and receive communication feedback"
-    )
-
-    # ---------------- Topic ----------------
-
-    topics = [
-
-        "Introduce yourself",
-
-        "Talk about your college",
-
-        "Talk about your favorite subject",
-
-        "Talk about your hobbies",
-
-        "Talk about your family",
-
-        "Talk about your career goal",
-
-        "Talk about your future plans",
-
-        "Why do you want to improve your English?",
-
-        "Talk about your daily routine",
-
-        "Describe your best friend"
-    ]
-
-    topic = random.choice(topics)
-
-    # Speaking duration can be selected for each practice session.
-    duration_frame = tk.Frame(main, bg=VERY_LIGHT_BLUE)
-    duration_frame.pack(pady=(0, 10))
-
-    tk.Label(
-        duration_frame,
-        text="Choose speaking time:",
-        font=("Arial", 11, "bold"),
-        bg=VERY_LIGHT_BLUE,
-        fg=NAVY
-    ).pack(side="left", padx=8)
-
-    duration_var = tk.StringVar(value="30 seconds")
-    duration_menu = ttk.Combobox(
-        duration_frame,
-        textvariable=duration_var,
-        values=("15 seconds", "30 seconds", "45 seconds", "60 seconds", "90 seconds", "120 seconds"),
-        state="readonly",
-        width=15,
-        font=("Arial", 11)
-    )
-    duration_menu.pack(side="left", padx=8)
-
-    topic_card = tk.Frame(
-        main,
-        bg=WHITE,
-        padx=20,
-        pady=12,
-        relief="solid",
-        bd=1
-    )
-
-    topic_card.pack(
-        fill="x",
-        padx=70
-    )
-
-    tk.Label(
-        topic_card,
-        text="TODAY'S SPEAKING TOPIC",
-        font=("Arial", 10, "bold"),
-        bg=WHITE,
-        fg=BLUE
-    ).pack()
-
-    tk.Label(
-        topic_card,
-        text=topic,
-        font=("Arial", 17, "bold"),
-        bg=WHITE,
-        fg=BLACK,
-        wraplength=900
-    ).pack(pady=5)
-
-    tk.Label(
-        topic_card,
-        text="Select your speaking time above before starting.",
-        font=("Arial", 10),
-        bg=WHITE,
-        fg=GREY
-    ).pack()
-
-    # ---------------- Timer ----------------
-
-    timer_label = tk.Label(
-        main,
-        text=f"{MAX_SPEAKING_SECONDS // 60:02d}:{MAX_SPEAKING_SECONDS % 60:02d}",
-        font=("Arial", 32, "bold"),
-        bg=VERY_LIGHT_BLUE,
-        fg=NAVY
-    )
-
-    timer_label.pack(pady=(15, 5))
-
-    status_label = tk.Label(
-        main,
-        text="Ready to start. Click the microphone button.",
-        font=("Arial", 12, "bold"),
-        bg=VERY_LIGHT_BLUE,
-        fg=GREY
-    )
-
-    status_label.pack(pady=5)
-
-    # ---------------- Progress ----------------
-
-    progress = ttk.Progressbar(
-        main,
-        orient="horizontal",
-        length=650,
-        mode="determinate",
-        maximum=MAX_SPEAKING_SECONDS
-    )
-
-    progress.pack(pady=5)
-
-    # ---------------- Text ----------------
-
-    text_box = tk.Text(
-        main,
-        height=7,
-        width=95,
-        font=("Arial", 13),
-        wrap="word",
-        bg=WHITE
-    )
-
-    text_box.pack(
-        padx=50,
-        pady=10
-    )
-
-    # ---------------- Buttons ----------------
-
-    button_frame = tk.Frame(
-        main,
-        bg=VERY_LIGHT_BLUE
-    )
-
-    button_frame.pack(pady=5)
-
-    listen_button = make_button(
-        button_frame,
-        "🎤 START SPEAKING",
-        None,
-        NAVY,
-        22,
-        2
-    )
-
-    listen_button.grid(
-        row=0,
-        column=0,
-        padx=7
-    )
-
-    analyze_button = make_button(
-        button_frame,
-        "🔍 ANALYZE MY SPEECH",
-        None,
-        GREEN,
-        22,
-        2
-    )
-
-    analyze_button.grid(
-        row=0,
-        column=1,
-        padx=7
-    )
-
-    # ---------------- Internal State ----------------
+    for i, (label, action, desc) in enumerate(items):
+        card = tk.Frame(grid, bg=WHITE, padx=15, pady=9, highlightthickness=1, highlightbackground="#E7EAF1")
+        card.grid(row=i//3, column=i%3, padx=9, pady=8, sticky="nsew")
+        tk.Label(card, text=label, bg=WHITE, fg=NAVY, font=("Segoe UI", 12, "bold")).pack(pady=(3, 4))
+        tk.Label(card, text=desc, bg=WHITE, fg=MUTED, font=("Segoe UI", 9), wraplength=270).pack(pady=3)
+        make_button(card, "Start Practice", action).pack(pady=(5, 1), fill="x")
+    for col in range(3):
+        grid.grid_columnconfigure(col, weight=1)
+    bottom = tk.Frame(root, bg=BG)
+    bottom.pack(pady=3)
+    make_button(bottom, "Logout", login_page, NAVY).pack(side="left", padx=5)
+    make_button(bottom, "Exit", root.destroy, RED).pack(side="left", padx=5)
+
+# ---------------- SPEECH PRACTICE CORE (UPDATED) ----------------
+def build_speech_page(title, prompt, activity, question_list=None):
+    clear_page()
+    page_heading(title, "Record your full answer, wait for transcription, review/edit the text, then analyse.")
+    tk.Label(root, text=prompt, bg=WHITE, fg=NAVY, wraplength=1000,
+             font=("Segoe UI", 13, "bold"), padx=20, pady=12).pack(fill="x", padx=22, pady=7)
+
+    controls = tk.Frame(root, bg=BG)
+    controls.pack(pady=5)
+    tk.Label(controls, text="Time limit:", bg=BG, fg=NAVY).pack(side="left", padx=5)
+    time_choice = ttk.Combobox(controls, values=["15","30","45","60","90","120"], state="readonly", width=8)
+    time_choice.set("60")
+    time_choice.pack(side="left", padx=5)
+    timer_label = tk.Label(controls, text="Ready", bg=BG, fg=PURPLE, font=("Segoe UI", 11, "bold"))
+    timer_label.pack(side="left", padx=14)
+
+    transcript = tk.Text(root, height=13, width=110, wrap="word", font=("Segoe UI", 11))
+    transcript.pack(fill="both", expand=True, padx=22, pady=8)
+    placeholder = "Your recognised speech will appear here. You can also type or edit your answer."
+    transcript.insert("1.0", placeholder)
+    status = tk.Label(root, text="Ready to practise.", bg=BG, fg=MUTED, font=("Segoe UI", 10))
+    status.pack(pady=3)
 
     state = {
-        "seconds": 0,
-        "limit": MAX_SPEAKING_SECONDS,
-        "recording": False,
-        "finished": False
+        "running": False, "recording": False, "seconds": 0,
+        "stop_event": threading.Event(), "thread": None,
+        "frames": [], "sample_rate": 16000, "channels": 1,
+        "audio_error": None
     }
 
-    def update_timer():
-
-        if not state["recording"]:
+    def timer_tick():
+        if not state["running"]:
             return
-
-        state["seconds"] += 1
-
-        remaining = state["limit"] - state["seconds"]
-
-        if remaining < 0:
-            remaining = 0
-
-        timer_label.config(
-            text=f"{remaining // 60:02d}:{remaining % 60:02d}"
-        )
-
-        progress["value"] = state["seconds"]
-
-        if state["seconds"] >= state["limit"]:
-
-            state["recording"] = False
-
-            status_label.config(
-                text=f"⏰ {state['limit']} seconds completed. Processing your voice...",
-                fg=ORANGE
-            )
-
+        if state["seconds"] <= 0:
+            state["running"] = False
+            state["stop_event"].set()
+            timer_label.config(text="Time completed")
+            status.config(text="Time limit reached. Finishing audio processing...")
             return
-
-        root.after(
-            1000,
-            update_timer
-        )
-
-    def start_recording():
-
-        global recording_in_progress
-
-        if recording_in_progress:
-
-            messagebox.showwarning(
-                "Recording in Progress",
-                "A recording is already running."
-            )
-
-            return
-
-        recording_in_progress = True
-
-        state["limit"] = int(duration_var.get().split()[0])
-        state["seconds"] = 0
-        state["recording"] = True
-        state["finished"] = False
-
-        text_box.delete(
-            "1.0",
-            tk.END
-        )
-
-        timer_label.config(
-            text=f"{state['limit'] // 60:02d}:{state['limit'] % 60:02d}",
-            fg=NAVY
-        )
-
-        progress.configure(maximum=state["limit"])
-        progress["value"] = 0
-
-        status_label.config(
-            text="🔍 Checking microphone...",
-            fg=BLUE
-        )
-
-        listen_button.config(
-            state="disabled"
-        )
-
-        analyze_button.config(
-            state="disabled"
-        )
-
-        root.after(
-            1000,
-            update_timer
-        )
-
-        thread = threading.Thread(
-            target=record_voice,
-            args=(text_box, status_label, state, state["limit"]),
-            daemon=True
-        )
-
-        thread.start()
-
-        root.after(
-            100,
-            check_voice_queue
-        )
-
-    def check_voice_queue():
-
-        global recording_in_progress
-
-        try:
-
-            message = voice_queue.get_nowait()
-
-            message_type = message[0]
-
-            if message_type == "status":
-
-                status_label.config(
-                    text=message[1],
-                    fg=message[2]
-                )
-
-                root.after(
-                    100,
-                    check_voice_queue
-                )
-
-            elif message_type == "success":
-
-                state["recording"] = False
-                state["finished"] = True
-
-                text = message[1]
-
-                text_box.delete(
-                    "1.0",
-                    tk.END
-                )
-
-                text_box.insert(
-                    tk.END,
-                    text
-                )
-
-                timer_label.config(
-                    text="VOICE READY",
-                    fg=GREEN
-                )
-
-                progress["value"] = state["seconds"]
-
-                status_label.config(
-                    text="✅ Voice verification completed. Voice converted to text.",
-                    fg=GREEN
-                )
-
-                listen_button.config(
-                    state="normal"
-                )
-
-                analyze_button.config(
-                    state="normal"
-                )
-
-                recording_in_progress = False
-
-            elif message_type == "error":
-
-                state["recording"] = False
-
-                status_label.config(
-                    text=message[1],
-                    fg=RED
-                )
-
-                listen_button.config(
-                    state="normal"
-                )
-
-                analyze_button.config(
-                    state="normal"
-                )
-
-                recording_in_progress = False
-
-                messagebox.showerror(
-                    "Voice Error",
-                    message[1]
-                )
-
-        except queue.Empty:
-
-            if recording_in_progress:
-
-                root.after(
-                    100,
-                    check_voice_queue
-                )
-
-    def analyze():
-
-        text = text_box.get(
-            "1.0",
-            tk.END
-        ).strip()
-
-        if not text:
-
-            messagebox.showwarning(
-                "No Speech",
-                "Please record your voice first."
-            )
-
-            return
-
-        analyze_button.config(
-            state="disabled"
-        )
-
-        status_label.config(
-            text="🔍 Analyzing grammar, vocabulary and communication...",
-            fg=ORANGE
-        )
-
-        root.update()
-
-        mistakes, corrections, corrected_text, vocabulary = analyze_communication(text)
-
-        score = calculate_score(
-            text,
-            mistakes
-        )
-
-        feedback = generate_feedback(
-            score,
-            len(mistakes),
-            len(text.split())
-        )
-
-        save_result(
-            "Voice Practice",
-            score,
-            feedback,
-            text,
-            corrected_text,
-            len(mistakes)
-        )
-
-        show_voice_analysis(
-            topic,
-            text,
-            mistakes,
-            corrections,
-            corrected_text,
-            vocabulary,
-            score,
-            feedback
-        )
-
-    listen_button.config(
-        command=start_recording
-    )
-
-    analyze_button.config(
-        command=analyze
-    )
-
-    create_back_button(main)
-
-
-# ============================================================
-# RECORD VOICE
-# ============================================================
-
-def record_voice(text_box, status_label, state, duration_seconds):
-    """Listen in short chunks until the selected speaking time ends.
-    This helps capture several sentences instead of stopping after one pause.
-    """
-    try:
-        recognizer = sr.Recognizer()
-        voice_queue.put(("status", "🔍 Checking microphone...", BLUE))
-        microphones = sr.Microphone.list_microphone_names()
-        if not microphones:
-            voice_queue.put(("error", "No microphone was detected on this computer."))
-            return
-
-        recognized_parts = []
-        with sr.Microphone() as source:
-            voice_queue.put(("status", "🎤 Microphone detected. Reducing background noise...", BLUE))
-            recognizer.adjust_for_ambient_noise(source, duration=0.8)
-            voice_queue.put(("status", f"🔴 LISTENING — Keep speaking naturally for up to {duration_seconds} seconds. Pauses are okay.", RED))
-            start_time = time.monotonic()
-            end_time = start_time + duration_seconds
-            while time.monotonic() < end_time:
-                remaining = end_time - time.monotonic()
-                try:
-                    audio = recognizer.listen(
-                        source,
-                        timeout=max(1, min(3, remaining)),
-                        phrase_time_limit=max(1, min(8, remaining))
-                    )
-                except sr.WaitTimeoutError:
-                    continue
-                try:
-                    part = recognizer.recognize_google(audio, language=SPEECH_LANGUAGE)
-                    if part and (not recognized_parts or part.lower() != recognized_parts[-1].lower()):
-                        recognized_parts.append(part.strip())
-                        voice_queue.put(("status", "📝 Captured speech so far: " + " ".join(recognized_parts)[-180:], BLUE))
-                except sr.UnknownValueError:
-                    # Ignore one unclear chunk and keep listening for the rest.
-                    continue
-                except sr.RequestError:
-                    voice_queue.put(("error", "Speech recognition service could not be reached. Check your internet connection."))
-                    return
-
-        state["recording"] = False
-        text = " ".join(recognized_parts).strip()
-        if not text:
-            voice_queue.put(("error", "No clear words were recognized. Move closer to the microphone, reduce background noise, and try again."))
-            return
-        voice_queue.put(("status", "✅ Voice captured. Preparing the complete recognized text...", GREEN))
-        voice_queue.put(("success", text))
-    except OSError as error:
-        state["recording"] = False
-        voice_queue.put(("error", "Microphone error:\n\n" + str(error)))
-    except Exception as error:
-        state["recording"] = False
-        voice_queue.put(("error", "Unexpected microphone error:\n\n" + str(error)))
-
-
-# ============================================================
-# COMMUNICATION ANALYSIS
-# ============================================================
-
-def analyze_communication(text):
-
-    original = text.strip()
-
-    lower = original.lower()
-
-    mistakes = []
-
-    corrections = []
-
-    corrected = original
-
-    # --------------------------------------------
-    # Grammar rules
-    # --------------------------------------------
-
-    rules = [
-
-        (
-            r"\bi am go\b",
-            "I am going",
-            "Use 'going' after 'I am'."
-        ),
-
-        (
-            r"\bi am went\b",
-            "I went",
-            "Do not use 'am' with 'went'."
-        ),
-
-        (
-            r"\bhe go\b",
-            "He goes",
-            "Use 'goes' with he."
-        ),
-
-        (
-            r"\bshe go\b",
-            "She goes",
-            "Use 'goes' with she."
-        ),
-
-        (
-            r"\bthey is\b",
-            "They are",
-            "Use 'are' with they."
-        ),
-
-        (
-            r"\bwe is\b",
-            "We are",
-            "Use 'are' with we."
-        ),
-
-        (
-            r"\bi has\b",
-            "I have",
-            "Use 'have' with I."
-        ),
-
-        (
-            r"\bhe have\b",
-            "He has",
-            "Use 'has' with he."
-        ),
-
-        (
-            r"\bshe have\b",
-            "She has",
-            "Use 'has' with she."
-        ),
-
-        (
-            r"\bhe don't\b",
-            "He doesn't",
-            "Use 'doesn't' with he."
-        ),
-
-        (
-            r"\bshe don't\b",
-            "She doesn't",
-            "Use 'doesn't' with she."
-        ),
-
-        (
-            r"\bdid not went\b",
-            "did not go",
-            "Use the base verb after 'did not'."
-        ),
-
-        (
-            r"\bdidn't went\b",
-            "didn't go",
-            "Use the base verb after 'didn't'."
-        ),
-
-        (
-            r"\bi am agree\b",
-            "I agree",
-            "Say 'I agree', not 'I am agree'."
-        ),
-
-        (
-            r"\bmore better\b",
-            "better",
-            "Do not use 'more' with 'better'."
-        ),
-
-        (
-            r"\bvery unique\b",
-            "unique",
-            "Usually 'unique' does not need 'very'."
-        )
-    ]
-
-    for pattern, correction, explanation in rules:
-
-        if re.search(
-            pattern,
-            lower
-        ):
-
-            mistakes.append(
-                f"Grammar issue: {re.search(pattern, lower).group()}"
-            )
-
-            corrections.append(
-                f"{correction} — {explanation}"
-            )
-
-            corrected = re.sub(
-                pattern,
-                correction,
-                corrected,
-                flags=re.IGNORECASE
-            )
-
-    # --------------------------------------------
-    # Missing punctuation
-    # --------------------------------------------
-
-    if original:
-
-        if original[-1] not in ".!?":
-
-            mistakes.append(
-                "Missing punctuation at the end."
-            )
-
-            corrections.append(
-                "Add a full stop or appropriate punctuation."
-            )
-
-            corrected += "."
-
-    # --------------------------------------------
-    # Sentence length
-    # --------------------------------------------
-
-    words = original.split()
-
-    if 0 < len(words) < 5:
-
-        mistakes.append(
-            "The answer is very short."
-        )
-
-        corrections.append(
-            "Try to speak using a longer and more complete sentence."
-        )
-
-    # --------------------------------------------
-    # Repeated words
-    # --------------------------------------------
-
-    repeated = re.findall(
-        r"\b(\w+)\s+\1\b",
-        lower
-    )
-
-    for word in repeated:
-
-        mistakes.append(
-            f"Repeated word: '{word}'"
-        )
-
-        corrections.append(
-            f"Remove the repeated word '{word}'."
-        )
-
-    # --------------------------------------------
-    # Vocabulary
-    # --------------------------------------------
-
-    vocabulary = find_vocabulary_words(
-        original
-    )
-
-    return (
-        mistakes,
-        corrections,
-        corrected,
-        vocabulary
-    )
-
-
-# ============================================================
-# VOCABULARY DATABASE
-# ============================================================
-
-VOCABULARY = {
-
-    "communication":
-        "The process of sharing information or ideas.",
-
-    "confidence":
-        "The belief in your ability to do something.",
-
-    "improve":
-        "To make something better.",
-
-    "practice":
-        "Doing something repeatedly to become better.",
-
-    "conversation":
-        "A talk between two or more people.",
-
-    "education":
-        "The process of learning knowledge and skills.",
-
-    "knowledge":
-        "Information and understanding gained through learning.",
-
-    "opportunity":
-        "A suitable chance to do something.",
-
-    "achievement":
-        "Something successfully completed.",
-
-    "career":
-        "A person's professional journey.",
-
-    "technology":
-        "Scientific knowledge used to solve practical problems.",
-
-    "experience":
-        "Knowledge gained by doing something.",
-
-    "challenge":
-        "A difficult task requiring effort.",
-
-    "solution":
-        "An answer to a problem.",
-
-    "responsible":
-        "Having a duty to take care of something.",
-
-    "creative":
-        "Having the ability to create new ideas.",
-
-    "development":
-        "The process of growth or improvement.",
-
-    "success":
-        "Achieving a desired goal.",
-
-    "future":
-        "The time that has not happened yet.",
-
-    "professional":
-        "Relating to a person's work or career."
-}
-
-
-# Extended beginner-friendly vocabulary bank (50+ words).
-VOCABULARY.update({
-    "adapt": "To change to suit a new situation.",
-    "ambition": "A strong wish to achieve something.",
-    "analyze": "To study something carefully.",
-    "appreciate": "To understand the value of something.",
-    "attitude": "The way a person thinks or feels.",
-    "benefit": "A helpful or good result.",
-    "collaborate": "To work together with others.",
-    "communicate": "To share information with someone.",
-    "compassion": "Concern for another person's difficulties.",
-    "consistent": "Doing something regularly in the same way.",
-    "contribute": "To give or add something to a group.",
-    "curious": "Eager to learn or know something.",
-    "decision": "A choice made after thinking.",
-    "dedication": "Strong commitment to a task or goal.",
-    "effective": "Producing the intended result.",
-    "efficient": "Working well without wasting time or effort.",
-    "empathy": "Understanding another person's feelings.",
-    "encourage": "To give someone confidence or support.",
-    "essential": "Completely necessary or very important.",
-    "evaluate": "To judge the quality or value of something.",
-    "flexible": "Able to change or adapt easily.",
-    "goal": "Something a person wants to achieve.",
-    "growth": "The process of developing or becoming better.",
-    "honest": "Truthful and sincere.",
-    "independent": "Able to do things without help.",
-    "initiative": "The ability to act without being told.",
-    "inspire": "To motivate someone to do something good.",
-    "leadership": "The ability to guide or manage people.",
-    "logical": "Based on clear reasoning.",
-    "motivate": "To give someone a reason to act.",
-    "organize": "To arrange things in a useful order.",
-    "patience": "The ability to wait calmly.",
-    "perspective": "A particular way of viewing something.",
-    "potential": "A possibility of future development.",
-    "priority": "Something that is more important than others.",
-    "productive": "Achieving useful results.",
-    "reliable": "Able to be trusted or depended on.",
-    "resilient": "Able to recover after difficulty.",
-    "respect": "To treat someone with care and value.",
-    "resourceful": "Good at finding ways to solve problems.",
-    "skill": "An ability gained through learning or practice.",
-    "strategy": "A plan to achieve a goal.",
-    "support": "To help or encourage someone.",
-    "teamwork": "People working together toward a shared goal.",
-    "thoughtful": "Showing care by thinking about others.",
-    "valuable": "Worth a lot or very useful.",
-    "versatile": "Able to do many different things.",
-    "visualize": "To form a picture in your mind.",
-    "willing": "Ready or happy to do something.",
-    "wisdom": "The ability to make good decisions using experience."
-})
-
-
-def find_vocabulary_words(text):
-
-    found = []
-
-    lower = text.lower()
-
-    for word in VOCABULARY:
-
-        if re.search(
-            r"\b" + re.escape(word) + r"\b",
-            lower
-        ):
-
-            found.append(word)
-
-    return found
-
-
-# ============================================================
-# SCORE
-# ============================================================
-
-def calculate_score(text, mistakes):
-
-    words = text.split()
-
-    score = 100
-
-    # Mistake penalty
-    score -= len(mistakes) * 10
-
-    # Reward longer speaking
-    if len(words) >= 15:
-        score += 5
-
-    elif len(words) >= 10:
-        score += 3
-
-    elif len(words) < 5:
-        score -= 10
-
-    score = max(
-        20,
-        min(100, score)
-    )
-
-    return score
-
-
-def generate_feedback(
-    score,
-    mistake_count,
-    word_count
-):
-
-    if score >= 90:
-
-        return (
-            "Excellent communication! "
-            "Your speech is clear and well structured. "
-            "Keep practicing to become even more confident."
-        )
-
-    if score >= 75:
-
-        return (
-            "Very good communication. "
-            "There are a few areas that can be improved."
-        )
-
-    if score >= 60:
-
-        return (
-            "Good effort. "
-            "Focus on grammar, sentence formation and vocabulary."
-        )
-
-    return (
-        "Keep practicing. "
-        "Try speaking slowly, using complete sentences "
-        "and checking your grammar."
-    )
-
-
-# ============================================================
-# VOICE ANALYSIS RESULT PAGE
-# ============================================================
-
-def show_voice_analysis(
-    topic,
-    original,
-    mistakes,
-    corrections,
-    corrected,
-    vocabulary,
-    score,
-    feedback
-):
-
-    clear_screen()
-
-    main = tk.Frame(
-        root,
-        bg=VERY_LIGHT_BLUE
-    )
-
-    main.pack(
-        fill="both",
-        expand=True
-    )
-
-    page_title(
-        main,
-        "📊 Speech Analysis Result",
-        "Your speaking practice has been analyzed"
-    )
-
-    # ---------------- Score ----------------
-
-    score_color = GREEN
-
-    if score < 60:
-        score_color = RED
-
-    elif score < 75:
-        score_color = ORANGE
-
-    score_card = tk.Frame(
-        main,
-        bg=WHITE,
-        bd=1,
-        relief="solid",
-        padx=25,
-        pady=10
-    )
-
-    score_card.pack(
-        fill="x",
-        padx=70,
-        pady=5
-    )
-
-    tk.Label(
-        score_card,
-        text=f"COMMUNICATION SCORE  {score}/100",
-        font=("Arial", 22, "bold"),
-        bg=WHITE,
-        fg=score_color
-    ).pack()
-
-    tk.Label(
-        score_card,
-        text=feedback,
-        font=("Arial", 11),
-        bg=WHITE,
-        fg=BLACK,
-        wraplength=850
-    ).pack(pady=5)
-
-    # ---------------- Original ----------------
-
-    original_box = create_result_box(
-        main,
-        "📝 1. YOUR SPEECH → TEXT",
-        BLUE
-    )
-
-    tk.Label(
-        original_box,
-        text=original,
-        font=("Arial", 12),
-        bg=WHITE,
-        fg=BLACK,
-        wraplength=900,
-        justify="left"
-    ).pack(
-        anchor="w"
-    )
-
-    # ---------------- Mistakes ----------------
-
-    mistake_box = create_result_box(
-        main,
-        "❌ 2. MISTAKES FOUND",
-        RED
-    )
-
-    if mistakes:
-
-        for mistake in mistakes:
-
-            tk.Label(
-                mistake_box,
-                text="• " + mistake,
-                font=("Arial", 11),
-                bg=WHITE,
-                fg=RED,
-                wraplength=900,
-                justify="left"
-            ).pack(
-                anchor="w",
-                pady=2
-            )
-
-    else:
-
-        tk.Label(
-            mistake_box,
-            text="🎉 No major mistakes were detected!",
-            font=("Arial", 11, "bold"),
-            bg=WHITE,
-            fg=GREEN
-        ).pack(anchor="w")
-
-    # ---------------- Corrections ----------------
-
-    correction_box = create_result_box(
-        main,
-        "✅ 3. HOW TO CORRECT IT",
-        GREEN
-    )
-
-    if corrections:
-
-        for correction in corrections:
-
-            tk.Label(
-                correction_box,
-                text="• " + correction,
-                font=("Arial", 11),
-                bg=WHITE,
-                fg=GREEN,
-                wraplength=900,
-                justify="left"
-            ).pack(
-                anchor="w",
-                pady=2
-            )
-
-    else:
-
-        tk.Label(
-            correction_box,
-            text="Your grammar looks good!",
-            font=("Arial", 11, "bold"),
-            bg=WHITE,
-            fg=GREEN
-        ).pack(anchor="w")
-
-    # ---------------- Correct sentence ----------------
-
-    corrected_box = create_result_box(
-        main,
-        "✨ 4. IMPROVED VERSION",
-        NAVY
-    )
-
-    tk.Label(
-        corrected_box,
-        text=corrected,
-        font=("Arial", 12, "bold"),
-        bg=WHITE,
-        fg=NAVY,
-        wraplength=900,
-        justify="left"
-    ).pack(anchor="w")
-
-    # ---------------- Vocabulary ----------------
-
-    vocab_box = create_result_box(
-        main,
-        "📚 5. VOCABULARY FOUND",
-        ORANGE
-    )
-
-    if vocabulary:
-
-        for word in vocabulary:
-
-            tk.Label(
-                vocab_box,
-                text=f"• {word.title()} — {VOCABULARY[word]}",
-                font=("Arial", 10),
-                bg=WHITE,
-                fg=BLACK,
-                wraplength=900,
-                justify="left"
-            ).pack(
-                anchor="w",
-                pady=1
-            )
-
-    else:
-
-        tk.Label(
-            vocab_box,
-            text="Try using more useful English vocabulary.",
-            font=("Arial", 10),
-            bg=WHITE,
-            fg=GREY
-        ).pack(anchor="w")
-
-    # ---------------- Buttons ----------------
-
-    buttons = tk.Frame(
-        main,
-        bg=VERY_LIGHT_BLUE
-    )
-
-    buttons.pack(
-        pady=12
-    )
-
-    make_button(
-        buttons,
-        "🎤 Practice Again",
-        voice_practice,
-        NAVY,
-        18
-    ).grid(
-        row=0,
-        column=0,
-        padx=5
-    )
-
-    make_button(
-        buttons,
-        "📊 My Progress",
-        progress_page,
-        GREEN,
-        18
-    ).grid(
-        row=0,
-        column=1,
-        padx=5
-    )
-
-    make_button(
-        buttons,
-        "🏠 Dashboard",
-        dashboard,
-        BLUE,
-        18
-    ).grid(
-        row=0,
-        column=2,
-        padx=5
-    )
-
-
-def create_result_box(parent, title, color):
-
-    box = tk.LabelFrame(
-        parent,
-        text=title,
-        font=("Arial", 11, "bold"),
-        bg=WHITE,
-        fg=color,
-        padx=15,
-        pady=8
-    )
-
-    box.pack(
-        fill="x",
-        padx=70,
-        pady=4
-    )
-
-    return box
-
-
-# ============================================================
-# TEXT PRACTICE
-# ============================================================
-
-def text_practice():
-
-    clear_screen()
-
-    main = tk.Frame(
-        root,
-        bg=VERY_LIGHT_BLUE
-    )
-
-    main.pack(
-        fill="both",
-        expand=True
-    )
-
-    page_title(
-        main,
-        "📝 Text Communication Practice",
-        "Type your English and receive the same analysis used for speech"
-    )
-
-    tk.Label(
-        main,
-        text="Write 2–5 sentences about any topic.",
-        font=("Arial", 12),
-        bg=VERY_LIGHT_BLUE,
-        fg=GREY
-    ).pack()
-
-    text_box = tk.Text(
-        main,
-        height=12,
-        width=95,
-        font=("Arial", 13),
-        wrap="word"
-    )
-
-    text_box.pack(
-        padx=60,
-        pady=15
-    )
-
-    def analyze():
-
-        text = text_box.get(
-            "1.0",
-            tk.END
-        ).strip()
-
-        if not text:
-
-            messagebox.showwarning(
-                "Empty Text",
-                "Please write something first."
-            )
-
-            return
-
-        mistakes, corrections, corrected, vocabulary = analyze_communication(
-            text
-        )
-
-        score = calculate_score(
-            text,
-            mistakes
-        )
-
-        feedback = generate_feedback(
-            score,
-            len(mistakes),
-            len(text.split())
-        )
-
-        save_result(
-            "Text Practice",
-            score,
-            feedback,
-            text,
-            corrected,
-            len(mistakes)
-        )
-
-        show_voice_analysis(
-            "Text Practice",
-            text,
-            mistakes,
-            corrections,
-            corrected,
-            vocabulary,
-            score,
-            feedback
-        )
-
-    make_button(
-        main,
-        "🔍 ANALYZE MY TEXT",
-        analyze,
-        GREEN,
-        25,
-        2
-    ).pack(pady=10)
-
-    create_back_button(main)
-
-
-# ============================================================
-# VOCABULARY PRACTICE
-# ============================================================
-
-def vocabulary_practice():
-    clear_screen()
-    main = tk.Frame(root, bg=VERY_LIGHT_BLUE)
-    main.pack(fill="both", expand=True)
-    page_title(main, "📚 Vocabulary Builder", "Study 50+ useful English words, meanings and examples")
-
-    words = list(VOCABULARY.items())
-    index = [0]
-    viewed = set()
-    word_label = tk.Label(main, text="", font=("Arial", 30, "bold"), bg=VERY_LIGHT_BLUE, fg=BLUE)
-    word_label.pack(pady=(12, 5))
-    count_label = tk.Label(main, text="", font=("Arial", 11, "bold"), bg=VERY_LIGHT_BLUE, fg=GREY)
-    count_label.pack()
-    meaning_label = tk.Label(main, text="Click SHOW MEANING to learn this word.", font=("Arial", 13), bg=WHITE, fg=BLACK, wraplength=850, padx=20, pady=15)
-    meaning_label.pack(fill="x", padx=70, pady=15)
-    example_label = tk.Label(main, text="", font=("Arial", 12, "italic"), bg=VERY_LIGHT_BLUE, fg=GREY, wraplength=850)
-    example_label.pack(pady=5)
-    status_label = tk.Label(main, text="Explore the words, then press SUBMIT PRACTICE.", font=("Arial", 11), bg=VERY_LIGHT_BLUE, fg=NAVY)
-    status_label.pack(pady=8)
-
-    def load_word():
-        word, meaning = words[index[0]]
-        word_label.config(text=word.upper())
-        count_label.config(text=f"Word {index[0]+1} of {len(words)}")
-        meaning_label.config(text="Click SHOW MEANING to learn this word.")
-        example_label.config(text="")
-
-    def show_meaning():
-        word, meaning = words[index[0]]
-        viewed.add(word)
-        meaning_label.config(text=meaning)
-        example_label.config(text=f"Example: I will use {word} in my daily communication.")
-        status_label.config(text=f"Words studied: {len(viewed)} / {len(words)}")
-
-    def next_word():
-        if index[0] < len(words)-1:
-            index[0] += 1
-            load_word()
-        else:
-            status_label.config(text="You reached the last word. You can submit your practice now.")
-
-    def submit():
-        if not viewed:
-            messagebox.showwarning("Study first", "Click SHOW MEANING for at least one word before submitting.")
-            return
-        score = round(len(viewed) / len(words) * 100)
-        feedback = f"You studied {len(viewed)} out of {len(words)} words. Review the remaining words to improve your vocabulary."
-        save_result("Vocabulary Practice", score, feedback, ", ".join(sorted(viewed)))
-        clear_screen()
-        result = tk.Frame(root, bg=VERY_LIGHT_BLUE)
-        result.pack(fill="both", expand=True)
-        page_title(result, "📊 Vocabulary Practice Result", "Your result is shown here")
-        tk.Label(result, text=f"Words studied: {len(viewed)} / {len(words)}", font=("Arial", 22, "bold"), bg=VERY_LIGHT_BLUE, fg=GREEN).pack(pady=15)
-        tk.Label(result, text=f"Practice score: {score}/100", font=("Arial", 18, "bold"), bg=VERY_LIGHT_BLUE, fg=NAVY).pack(pady=8)
-        tk.Label(result, text=feedback, font=("Arial", 12), bg=VERY_LIGHT_BLUE, fg=BLACK, wraplength=800).pack(pady=10)
-        make_button(result, "📚 Practice Again", vocabulary_practice, NAVY, 22, 2).pack(pady=8)
-        make_button(result, "🏠 Go to Dashboard", dashboard, GREEN, 22, 2).pack(pady=8)
-
-    controls = tk.Frame(main, bg=VERY_LIGHT_BLUE)
-    controls.pack(pady=12)
-    make_button(controls, "SHOW MEANING", show_meaning, NAVY, 17, 2).grid(row=0, column=0, padx=5)
-    make_button(controls, "NEXT WORD ➜", next_word, BLUE, 17, 2).grid(row=0, column=1, padx=5)
-    make_button(controls, "✅ SUBMIT PRACTICE", submit, GREEN, 20, 2).grid(row=0, column=2, padx=5)
-    create_back_button(main)
-    load_word()
-
-
-# ============================================================
-# GRAMMAR PRACTICE
-# ============================================================
-
-GRAMMAR_QUESTIONS = [
-    ("She ___ to college every day.", ["go", "goes", "going"], "goes"),
-    ("They ___ students.", ["is", "are", "am"], "are"),
-    ("I ___ learning Python.", ["am", "is", "are"], "am"),
-    ("He ___ English every day.", ["practice", "practices", "practicing"], "practices"),
-    ("We ___ ready.", ["is", "are", "am"], "are"),
-    ("Yesterday, she ___ a book.", ["read", "reads", "reading"], "read"),
-    ("I ___ a student.", ["am", "is", "are"], "am"),
-    ("They ___ playing football.", ["is", "are", "am"], "are"),
-    ("He ___ a new phone.", ["have", "has", "having"], "has"),
-    ("We ___ English every day.", ["practice", "practices", "practicing"], "practice"),
-    ("I ___ to the library yesterday.", ["go", "went", "gone"], "went"),
-    ("She has ___ her homework.", ["complete", "completed", "completing"], "completed"),
-    ("There ___ many books on the table.", ["is", "are", "am"], "are"),
-    ("This is ___ apple.", ["a", "an", "the"], "an"),
-    ("He is taller ___ me.", ["then", "than", "that"], "than"),
-    ("I have lived here ___ 2020.", ["for", "since", "from"], "since"),
-    ("She ___ cooking when I arrived.", ["was", "were", "is"], "was"),
-    ("If it rains, we ___ stay home.", ["will", "would", "did"], "will"),
-    ("The children ___ finished their work.", ["has", "have", "is"], "have"),
-    ("Neither answer ___ correct.", ["are", "is", "were"], "is"),
-    ("My brother and I ___ friends.", ["am", "is", "are"], "are"),
-    ("She speaks English very ___. ", ["good", "well", "best"], "well"),
-    ("I am interested ___ computers.", ["on", "at", "in"], "in"),
-    ("Please listen ___ the teacher.", ["to", "for", "at"], "to"),
-    ("He did not ___ the answer.", ["knew", "know", "known"], "know"),
-    ("They ___ dinner at 8 pm last night.", ["have", "had", "has"], "had"),
-    ("This bag is ___ than that one.", ["heavy", "heavier", "heaviest"], "heavier"),
-    ("Mount Everest is the ___ mountain.", ["high", "higher", "highest"], "highest"),
-    ("The letter ___ written yesterday.", ["was", "were", "is"], "was"),
-    ("You ___ wear a helmet while riding.", ["should", "would", "might to"], "should"),
-    ("I have ___ seen that movie.", ["already", "yet", "still"], "already"),
-    ("Have you finished your work ___?", ["already", "yet", "ever"], "yet"),
-    ("She enjoys ___ books.", ["read", "reading", "to reading"], "reading"),
-    ("I want ___ a software engineer.", ["be", "being", "to be"], "to be"),
-    ("The students ___ by the teacher.", ["were praised", "praised", "praise"], "were praised"),
-    ("Each student ___ a notebook.", ["have", "has", "are"], "has"),
-    ("The news ___ surprising.", ["are", "were", "is"], "is"),
-    ("She asked me ___ I was ready.", ["if", "what", "which"], "if"),
-    ("I would travel more if I ___ time.", ["have", "had", "will have"], "had"),
-    ("By next year, I ___ the course.", ["finish", "will have finished", "finished"], "will have finished"),
-    ("He is good ___ mathematics.", ["in", "at", "on"], "at"),
-    ("We arrived ___ the station early.", ["at", "in", "on"], "at"),
-    ("The cat is hiding ___ the table.", ["under", "between", "during"], "under"),
-    ("She ___ be at home; the lights are on.", ["must", "must to", "has"], "must"),
-    ("I prefer tea ___ coffee.", ["than", "to", "over than"], "to"),
-    ("There isn't ___ milk left.", ["many", "much", "few"], "much"),
-    ("How ___ students are in your class?", ["much", "many", "little"], "many"),
-    ("The man ___ lives next door is kind.", ["which", "who", "where"], "who"),
-    ("Please give me ___ information.", ["an", "some", "many"], "some"),
-    ("She said that she ___ tired.", ["is", "was", "were"], "was"),
-]
-
-
-def grammar_practice():
-    clear_screen()
-    main = tk.Frame(root, bg=VERY_LIGHT_BLUE)
-    main.pack(fill="both", expand=True)
-    page_title(main, "📖 Grammar Practice", "50 questions • Select one answer and submit your quiz")
-    questions = random.sample(GRAMMAR_QUESTIONS, min(50, len(GRAMMAR_QUESTIONS)))
-    index = [0]
-    answers = {}
-    selected = tk.StringVar()
-    question_label = tk.Label(main, text="", font=("Arial", 18, "bold"), bg=VERY_LIGHT_BLUE, fg=BLACK, wraplength=900)
-    question_label.pack(pady=25)
-    option_frame = tk.Frame(main, bg=VERY_LIGHT_BLUE)
-    option_frame.pack()
-    radios = []
-    for _ in range(3):
-        radio = tk.Radiobutton(option_frame, text="", variable=selected, value="", font=("Arial", 13), bg=VERY_LIGHT_BLUE, fg=BLACK, anchor="w", width=35)
-        radio.pack(anchor="w", pady=5)
-        radios.append(radio)
-    progress_label = tk.Label(main, text="", font=("Arial", 11, "bold"), bg=VERY_LIGHT_BLUE, fg=GREY)
-    progress_label.pack(pady=12)
-    feedback_label = tk.Label(main, text="", font=("Arial", 11), bg=VERY_LIGHT_BLUE, fg=NAVY, wraplength=800)
-    feedback_label.pack(pady=5)
-
-    def load_question():
-        q, options, _ = questions[index[0]]
-        question_label.config(text=q)
-        progress_label.config(text=f"Question {index[0]+1} of {len(questions)}")
-        selected.set(answers.get(index[0], ""))
-        for i, radio in enumerate(radios):
-            radio.config(text=options[i], value=options[i])
-        next_btn.config(text="✅ SUBMIT QUIZ" if index[0] == len(questions)-1 else "SAVE & NEXT QUESTION ➜")
-        feedback_label.config(text="")
-
-    def finish_quiz():
-        if selected.get():
-            answers[index[0]] = selected.get()
-        correct = sum(1 for i, (_, _, ans) in enumerate(questions) if answers.get(i) == ans)
-        score = round(correct / len(questions) * 100)
-        review = []
-        for i, (q, _, ans) in enumerate(questions):
-            chosen = answers.get(i, "Not answered")
-            review.append(f"{i+1}. {q}\n   Your answer: {chosen} | Correct answer: {ans}")
-        feedback = f"You answered {correct} out of {len(questions)} correctly. " + ("Excellent work!" if score >= 80 else "Review the correct answers below and try again.")
-        save_result("Grammar Practice", score, feedback, "Grammar quiz", "\n".join(review), len(questions)-correct)
-        clear_screen()
-        result = tk.Frame(root, bg=VERY_LIGHT_BLUE)
-        result.pack(fill="both", expand=True)
-        page_title(result, "📊 Grammar Quiz Analysis", "Your score and answer review are shown below")
-        tk.Label(result, text=f"Score: {correct}/{len(questions)}  ({score}/100)", font=("Arial", 23, "bold"), bg=VERY_LIGHT_BLUE, fg=GREEN if score >= 60 else RED).pack(pady=8)
-        tk.Label(result, text=feedback, font=("Arial", 12), bg=VERY_LIGHT_BLUE, fg=BLACK).pack(pady=5)
-        review_box = tk.Text(result, height=18, width=105, wrap="word", font=("Arial", 10))
-        review_box.pack(fill="both", expand=True, padx=35, pady=10)
-        review_box.insert("1.0", "\n\n".join(review))
-        review_box.config(state="disabled")
-        make_button(result, "🔁 TRY GRAMMAR AGAIN", grammar_practice, NAVY, 22, 2).pack(pady=5)
-        make_button(result, "🏠 GO TO DASHBOARD", dashboard, GREEN, 22, 2).pack(pady=5)
-
-    def next_question():
-        if selected.get() == "":
-            messagebox.showwarning("Choose Answer", "Please choose an answer before continuing.")
-            return
-        answers[index[0]] = selected.get()
-        if index[0] == len(questions)-1:
-            finish_quiz()
-        else:
-            index[0] += 1
-            load_question()
-
-    next_btn = make_button(main, "SAVE & NEXT QUESTION ➜", next_question, NAVY, 27, 2)
-    next_btn.pack(pady=15)
-    create_back_button(main)
-    load_question()
-
-
-# ============================================================
-# SENTENCE PRACTICE
-# ============================================================
-
-def sentence_practice():
-
-    clear_screen()
-
-    main = tk.Frame(
-        root,
-        bg=VERY_LIGHT_BLUE
-    )
-
-    main.pack(
-        fill="both",
-        expand=True
-    )
-
-    page_title(
-        main,
-        "✍ Sentence Practice",
-        "Create a complete sentence using the given word"
-    )
-
-    # Speaking time selector for the Speak button on this page.
-    duration_frame = tk.Frame(main, bg=VERY_LIGHT_BLUE)
-    duration_frame.pack(pady=6)
-    tk.Label(duration_frame, text="Speaking time limit:", font=("Arial", 11, "bold"),
-             bg=VERY_LIGHT_BLUE, fg=NAVY).pack(side="left", padx=6)
-    duration_var = tk.StringVar(value="30 seconds")
-    ttk.Combobox(duration_frame, textvariable=duration_var,
-                 values=["15 seconds", "30 seconds", "45 seconds", "60 seconds", "90 seconds", "120 seconds"],
-                 state="readonly", width=14).pack(side="left", padx=6)
-
-    target_word = random.choice(
-        list(VOCABULARY.keys())
-    )
-
-    tk.Label(
-        main,
-        text="YOUR WORD",
-        font=("Arial", 11, "bold"),
-        bg=VERY_LIGHT_BLUE,
-        fg=GREY
-    ).pack(pady=10)
-
-    tk.Label(
-        main,
-        text=target_word.upper(),
-        font=("Arial", 30, "bold"),
-        bg=VERY_LIGHT_BLUE,
-        fg=BLUE
-    ).pack()
-
-    text_box = tk.Text(
-        main,
-        height=8,
-        width=85,
-        font=("Arial", 13)
-    )
-
-    text_box.pack(
-        pady=20
-    )
-
-    def check():
-        text = text_box.get("1.0", tk.END).strip()
-        if not text:
-            messagebox.showwarning("Empty", "Please write or speak a sentence first.")
-            return
-
-        contains_word = target_word.lower() in text.lower()
-        score = 100 if contains_word else 50
-        feedback = (f"Excellent! Your sentence includes '{target_word}'." if contains_word
-                    else f"Your sentence does not include '{target_word}'. Try writing a sentence using this word.")
-        save_result("Sentence Practice", score, feedback, text)
-
-        # Display analysis directly on this page instead of using a popup.
-        result_frame = tk.Frame(main, bg=WHITE, padx=18, pady=12, relief="solid", bd=1)
-        result_frame.pack(fill="x", padx=65, pady=8)
-        tk.Label(result_frame, text="📊 YOUR SENTENCE ANALYSIS", font=("Arial", 15, "bold"), bg=WHITE, fg=NAVY).pack(pady=4)
-        tk.Label(result_frame, text=f"Your sentence: {text}", font=("Arial", 11), bg=WHITE, fg=BLACK, wraplength=850, justify="left").pack(anchor="w", pady=4)
-        tk.Label(result_frame, text=f"Target word: {target_word}", font=("Arial", 11, "bold"), bg=WHITE, fg=BLUE).pack(anchor="w", pady=3)
-        tk.Label(result_frame, text=f"Score: {score}/100", font=("Arial", 17, "bold"), bg=WHITE, fg=GREEN if score == 100 else ORANGE).pack(pady=3)
-        tk.Label(result_frame, text=feedback, font=("Arial", 11), bg=WHITE, fg=BLACK, wraplength=850).pack(pady=4)
-        make_button(result_frame, "🏠 GO TO DASHBOARD", dashboard, GREEN, 22, 2).pack(pady=7)
-
-    def speak():
-
-        duration_seconds = int(duration_var.get().split()[0])
-
-        status = tk.Label(
-            main,
-            text="🎤 Listening...",
-            font=("Arial", 11, "bold"),
-            bg=VERY_LIGHT_BLUE,
-            fg=BLUE
-        )
-
-        status.pack()
-
-        def worker():
-
-            try:
-
-                recognizer = sr.Recognizer()
-
-                with sr.Microphone() as source:
-
-                    recognizer.adjust_for_ambient_noise(
-                        source,
-                        duration=1
-                    )
-
-                    audio = recognizer.listen(
-                        source,
-                        timeout=10,
-                        phrase_time_limit=duration_seconds
-                    )
-
-                text = recognizer.recognize_google(
-                    audio,
-                    language=SPEECH_LANGUAGE
-                )
-
-                root.after(
-                    0,
-                    lambda: insert_spoken_text(
-                        text,
-                        text_box,
-                        status
-                    )
-                )
-
-            except Exception as error:
-
-                root.after(
-                    0,
-                    lambda: status.config(
-                        text="❌ " + str(error),
-                        fg=RED
-                    )
-                )
-
-        threading.Thread(
-            target=worker,
-            daemon=True
-        ).start()
-
-    button_frame = tk.Frame(
-        main,
-        bg=VERY_LIGHT_BLUE
-    )
-
-    button_frame.pack()
-
-    make_button(
-        button_frame,
-        "🎤 SPEAK",
-        speak,
-        NAVY,
-        18
-    ).grid(
-        row=0,
-        column=0,
-        padx=8
-    )
-
-    make_button(
-        button_frame,
-        "✅ SUBMIT & ANALYZE",
-        check,
-        GREEN,
-        18
-    ).grid(
-        row=0,
-        column=1,
-        padx=8
-    )
-
-    create_back_button(main)
-
-
-def insert_spoken_text(
-    text,
-    text_box,
-    status
-):
-
-    text_box.delete(
-        "1.0",
-        tk.END
-    )
-
-    text_box.insert(
-        tk.END,
-        text
-    )
-
-    status.config(
-        text="✅ Voice converted to text.",
-        fg=GREEN
-    )
-
-
-# ============================================================
-# DAILY CONVERSATION
-# ============================================================
-
-def conversation_practice():
-
-    clear_screen()
-
-    main = tk.Frame(
-        root,
-        bg=VERY_LIGHT_BLUE
-    )
-
-    main.pack(
-        fill="both",
-        expand=True
-    )
-
-    page_title(
-        main,
-        "🗣 Daily Conversation",
-        "Answer the question naturally in English"
-    )
-
-    # Speaking time selector for the Speak Answer button on this page.
-    duration_frame = tk.Frame(main, bg=VERY_LIGHT_BLUE)
-    duration_frame.pack(pady=6)
-    tk.Label(duration_frame, text="Answer time limit:", font=("Arial", 11, "bold"),
-             bg=VERY_LIGHT_BLUE, fg=NAVY).pack(side="left", padx=6)
-    duration_var = tk.StringVar(value="30 seconds")
-    ttk.Combobox(duration_frame, textvariable=duration_var,
-                 values=["15 seconds", "30 seconds", "45 seconds", "60 seconds", "90 seconds", "120 seconds"],
-                 state="readonly", width=14).pack(side="left", padx=6)
-
-    questions = [
-
-        "What did you learn today?",
-
-        "What is your favorite subject and why?",
-
-        "What is your career goal?",
-
-        "Tell me about your best friend.",
-
-        "What do you do in your free time?",
-
-        "Why do you want to improve your English?",
-
-        "Tell me about your daily routine.",
-
-        "What are your plans for the future?"
-    ]
-
-    question = random.choice(
-        questions
-    )
-
-    card = tk.Frame(
-        main,
-        bg=WHITE,
-        padx=25,
-        pady=20,
-        relief="solid",
-        bd=1
-    )
-
-    card.pack(
-        fill="x",
-        padx=70
-    )
-
-    tk.Label(
-        card,
-        text="QUESTION",
-        font=("Arial", 10, "bold"),
-        bg=WHITE,
-        fg=BLUE
-    ).pack()
-
-    tk.Label(
-        card,
-        text=question,
-        font=("Arial", 17, "bold"),
-        bg=WHITE,
-        fg=BLACK,
-        wraplength=850
-    ).pack(pady=5)
-
-    text_box = tk.Text(
-        main,
-        height=10,
-        width=90,
-        font=("Arial", 13),
-        wrap="word"
-    )
-
-    text_box.pack(
-        pady=15
-    )
-
-    status = tk.Label(
-        main,
-        text="Type your answer or use the microphone.",
-        font=("Arial", 11),
-        bg=VERY_LIGHT_BLUE,
-        fg=GREY
-    )
-
-    status.pack()
-
-    def speak():
-
-        duration_seconds = int(duration_var.get().split()[0])
-
-        def worker():
-
-            try:
-
-                recognizer = sr.Recognizer()
-
-                with sr.Microphone() as source:
-
-                    root.after(
-                        0,
-                        lambda: status.config(
-                            text="🎤 Listening...",
-                            fg=BLUE
-                        )
-                    )
-
-                    recognizer.adjust_for_ambient_noise(
-                        source,
-                        duration=1
-                    )
-
-                    audio = recognizer.listen(
-                        source,
-                        timeout=10,
-                        phrase_time_limit=duration_seconds
-                    )
-
-                text = recognizer.recognize_google(
-                    audio,
-                    language=SPEECH_LANGUAGE
-                )
-
-                root.after(
-                    0,
-                    lambda: insert_spoken_text(
-                        text,
-                        text_box,
-                        status
-                    )
-                )
-
-            except Exception as error:
-
-                root.after(
-                    0,
-                    lambda: status.config(
-                        text="❌ " + str(error),
-                        fg=RED
-                    )
-                )
-
-        threading.Thread(
-            target=worker,
-            daemon=True
-        ).start()
-
-    def evaluate():
-
-        text = text_box.get(
-            "1.0",
-            tk.END
-        ).strip()
-
-        if not text:
-
-            messagebox.showwarning(
-                "No Answer",
-                "Please answer the question."
-            )
-
-            return
-
-        mistakes, corrections, corrected, vocabulary = analyze_communication(
-            text
-        )
-
-        word_count = len(
-            text.split()
-        )
-
-        score = min(
-            100,
-            max(
-                20,
-                word_count * 5 - len(mistakes) * 8
-            )
-        )
-
-        feedback = generate_feedback(
-            score,
-            len(mistakes),
-            word_count
-        )
-
-        save_result(
-            "Daily Conversation",
-            score,
-            feedback,
-            text,
-            corrected,
-            len(mistakes)
-        )
-
-        show_voice_analysis(
-            question,
-            text,
-            mistakes,
-            corrections,
-            corrected,
-            vocabulary,
-            score,
-            feedback
-        )
-
-    buttons = tk.Frame(
-        main,
-        bg=VERY_LIGHT_BLUE
-    )
-
-    buttons.pack(
-        pady=10
-    )
-
-    make_button(
-        buttons,
-        "🎤 SPEAK ANSWER",
-        speak,
-        NAVY,
-        20
-    ).grid(
-        row=0,
-        column=0,
-        padx=5
-    )
-
-    make_button(
-        buttons,
-        "🔍 ANALYZE ANSWER",
-        evaluate,
-        GREEN,
-        20
-    ).grid(
-        row=0,
-        column=1,
-        padx=5
-    )
-
-    create_back_button(main)
-
-
-# ============================================================
-# PRONUNCIATION
-# ============================================================
-
-def pronunciation_practice():
-
-    clear_screen()
-
-    main = tk.Frame(
-        root,
-        bg=VERY_LIGHT_BLUE
-    )
-
-    main.pack(
-        fill="both",
-        expand=True
-    )
-
-    page_title(
-        main,
-        "🔊 Pronunciation Practice",
-        "Listen to the word and repeat it"
-    )
-
-    # Speaking time selector for the Repeat Word button on this page.
-    duration_frame = tk.Frame(main, bg=VERY_LIGHT_BLUE)
-    duration_frame.pack(pady=6)
-    tk.Label(duration_frame, text="Repeat time limit:", font=("Arial", 11, "bold"),
-             bg=VERY_LIGHT_BLUE, fg=NAVY).pack(side="left", padx=6)
-    duration_var = tk.StringVar(value="15 seconds")
-    ttk.Combobox(duration_frame, textvariable=duration_var,
-                 values=["5 seconds", "10 seconds", "15 seconds", "30 seconds", "45 seconds"],
-                 state="readonly", width=14).pack(side="left", padx=6)
-
-    words = [
-        "communication",
-        "confidence",
-        "opportunity",
-        "technology",
-        "professional",
-        "achievement",
-        "development",
-        "conversation"
-    ]
-
-    word = random.choice(
-        words
-    )
-
-    word_label = tk.Label(
-        main,
-        text=word,
-        font=("Arial", 32, "bold"),
-        bg=VERY_LIGHT_BLUE,
-        fg=BLUE
-    )
-
-    word_label.pack(
-        pady=30
-    )
-
-    result_label = tk.Label(
-        main,
-        text="",
-        font=("Arial", 14, "bold"),
-        bg=VERY_LIGHT_BLUE
-    )
-
-    result_label.pack(
-        pady=15
-    )
-
-    def hear():
-
-        try:
-
-            engine = pyttsx3.init()
-
-            engine.setProperty(
-                "rate",
-                145
-            )
-
-            engine.say(
-                word
-            )
-
-            engine.runAndWait()
-
-        except Exception as error:
-
+        timer_label.config(text=f"{state['seconds']} sec remaining")
+        state["seconds"] -= 1
+        active_timer["job"] = root.after(1000, timer_tick)
+
+    def reset_placeholder():
+        if transcript.get("1.0", "end-1c").strip() == placeholder:
+            transcript.delete("1.0", "end")
+
+    def append_status(message):
+        status.config(text=message)
+
+    def start():
+        if sr is None:
             messagebox.showerror(
-                "Voice Error",
-                str(error)
+                "Speech package missing",
+                "Install microphone packages:\npython -m pip install SpeechRecognition PyAudio",
+                parent=root
             )
+            return
+        if state["running"] or state["recording"]:
+            return
+        reset_placeholder()
+        transcript.delete("1.0", "end")
+        state["frames"] = []
+        state["audio_error"] = None
+        state["stop_event"] = threading.Event()
+        state["running"] = True
+        state["recording"] = True
+        state["seconds"] = int(time_choice.get())
+        timer_tick()
+        status.config(text="Starting microphone. Please wait...")
 
-    def repeat():
-
-        duration_seconds = int(duration_var.get().split()[0])
-
-        result_label.config(
-            text="🎤 Listening...",
-            fg=BLUE
-        )
-
-        def worker():
-
+        def recorder():
             try:
-
-                recognizer = sr.Recognizer()
-
-                with sr.Microphone() as source:
-
-                    recognizer.adjust_for_ambient_noise(
-                        source,
-                        duration=1
+                # Record the whole selected practice into one audio file.
+                # PyAudio callback captures audio continuously, including pauses.
+                import pyaudio
+                pa = pyaudio.PyAudio()
+                stream = None
+                sample_rate = 16000
+                chunk = 1024
+                try:
+                    stream = pa.open(
+                        format=pyaudio.paInt16,
+                        channels=1,
+                        rate=sample_rate,
+                        input=True,
+                        frames_per_buffer=chunk
                     )
-
-                    audio = recognizer.listen(
-                        source,
-                        timeout=10,
-                        phrase_time_limit=duration_seconds
-                    )
-
-                text = recognizer.recognize_google(
-                    audio,
-                    language=SPEECH_LANGUAGE
-                )
-
-                if word.lower() in text.lower():
-
-                    score = 100
-
-                    result = (
-                        "✅ Correct word recognized!\n"
-                        f"You said: {text}"
-                    )
-
+                    safe_after(append_status, "Microphone ready. Speak naturally; your complete answer is recording.")
+                    start_time = __import__("time").time()
+                    while not state["stop_event"].is_set():
+                        data = stream.read(chunk, exception_on_overflow=False)
+                        state["frames"].append(data)
+                        if __import__("time").time() - start_time >= state["seconds"]:
+                            # Timer is also UI-driven; this is a safety stop.
+                            state["stop_event"].set()
+                            break
+                finally:
+                    if stream is not None:
+                        stream.stop_stream()
+                        stream.close()
+                    pa.terminate()
+            except Exception as exc:
+                state["audio_error"] = str(exc)
+            finally:
+                state["recording"] = False
+                state["running"] = False
+                safe_after(stop_timer)
+                if state["audio_error"]:
+                    safe_after(append_status, "Microphone recording failed. You can type your answer manually.")
+                    safe_after(messagebox.showerror, "Microphone Error", state["audio_error"])
+                elif state["frames"]:
+                    safe_after(append_status, "Recording complete. Transcribing the full recording... Please wait.")
+                    threading.Thread(target=transcribe_full_recording, daemon=True).start()
                 else:
+                    safe_after(append_status, "No audio captured. Check microphone permission and try again.")
 
-                    score = 40
+        state["thread"] = threading.Thread(target=recorder, daemon=True)
+        state["thread"].start()
 
-                    result = (
-                        "❌ Try again.\n"
-                        f"You said: {text}"
-                    )
-
-                save_result(
-                    "Pronunciation",
-                    score,
-                    result
+    def transcribe_full_recording():
+        temp_path = None
+        try:
+            if whisper is None:
+                # Fallback to Google recognition by processing audio in segments.
+                # This is less reliable for long paragraphs; Whisper is recommended.
+                recognizer = sr.Recognizer()
+                recognised_parts = []
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                    temp_path = f.name
+                with wave.open(temp_path, "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(state["sample_rate"])
+                    wf.writeframes(b"".join(state["frames"]))
+                with sr.AudioFile(temp_path) as source:
+                    while True:
+                        try:
+                            audio = recognizer.record(source, duration=12)
+                            if not audio.frame_data:
+                                break
+                            try:
+                                recognised_parts.append(recognizer.recognize_google(audio, language="en-IN"))
+                            except sr.UnknownValueError:
+                                continue
+                        except Exception:
+                            break
+                result_text = " ".join(recognised_parts).strip()
+                if not result_text:
+                    raise RuntimeError("No speech was recognised. Try speaking clearly or type your answer.")
+            else:
+                with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                    temp_path = f.name
+                with wave.open(temp_path, "wb") as wf:
+                    wf.setnchannels(1)
+                    wf.setsampwidth(2)
+                    wf.setframerate(state["sample_rate"])
+                    wf.writeframes(b"".join(state["frames"]))
+                # base model is a good accuracy/speed compromise.
+                # Use model='small' for more accuracy on a capable computer.
+                model = whisper.load_model("base")
+                result = model.transcribe(
+                    temp_path,
+                    language="en",
+                    task="transcribe",
+                    fp16=False,
+                    verbose=False,
+                    condition_on_previous_text=True
                 )
+                result_text = result.get("text", "").strip()
+                if not result_text:
+                    raise RuntimeError("No speech was recognised. Try again in a quieter place.")
 
-                root.after(
-                    0,
-                    lambda: result_label.config(
-                        text=result,
-                        fg=GREEN if score == 100 else RED
-                    )
-                )
+            def display_transcript():
+                transcript.delete("1.0", "end")
+                transcript.insert("1.0", result_text)
+                status.config(text=f"Transcription completed. {len(result_text.split())} words captured. Review it, then submit for analysis.")
+            safe_after(display_transcript)
 
-            except Exception as error:
+        except Exception as exc:
+            err = str(exc)
+            safe_after(append_status, "Transcription failed. You can type/edit your answer in the text box.")
+            safe_after(messagebox.showerror, "Transcription Error", err)
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
 
-                root.after(
-                    0,
-                    lambda: result_label.config(
-                        text="❌ " + str(error),
-                        fg=RED
-                    )
-                )
+    def stop():
+        if state["recording"] or state["running"]:
+            state["stop_event"].set()
+            status.config(text="Stopping recording and preparing the full transcript...")
+            timer_label.config(text="Stopped")
+            stop_timer()
+        else:
+            status.config(text="Recording is not active. You can edit the transcript or start again.")
 
-        threading.Thread(
-            target=worker,
-            daemon=True
-        ).start()
+    def clear_text():
+        if state["recording"]:
+            messagebox.showwarning("Recording active", "Stop recording before clearing the transcript.", parent=root)
+            return
+        transcript.delete("1.0", "end")
 
-    buttons = tk.Frame(
-        main,
-        bg=VERY_LIGHT_BLUE
-    )
+    def analyse():
+        if state["recording"] or state["running"]:
+            messagebox.showwarning(
+                "Recording in progress",
+                "Press Stop Listening and wait until transcription is complete before analysis.",
+                parent=root
+            )
+            return
+        text = transcript.get("1.0", "end-1c").strip()
+        if not text or text == placeholder:
+            messagebox.showwarning("No answer", "Speak first or type your answer in the box.", parent=root)
+            return
+        score, feedback, corrected = analyse_text(text, activity)
+        save_progress(activity, score)
+        full = f"YOUR FULL TRANSCRIPT:\n{text}\n\n{feedback}"
+        show_feedback_page(f"📊 {activity} Analysis", full, activity, score, corrected)
 
-    buttons.pack()
+    row = tk.Frame(root, bg=BG)
+    row.pack(pady=5)
+    make_button(row, "🎙 Start Recording", start, GREEN).pack(side="left", padx=5)
+    make_button(row, "Stop Listening", stop, ORANGE).pack(side="left", padx=5)
+    make_button(row, "Clear Text", clear_text, NAVY).pack(side="left", padx=5)
+    make_button(row, "Submit & Analyse", analyse, GREEN).pack(side="left", padx=5)
+    back_button(root)
 
-    make_button(
-        buttons,
-        "🔊 HEAR WORD",
-        hear,
-        NAVY,
-        20
-    ).grid(
-        row=0,
-        column=0,
-        padx=8
-    )
+def speaking_page():
+    build_speech_page("🎤 Speaking Practice", "Topic: " + random.choice(speaking_topics), "Speaking")
 
-    make_button(
-        buttons,
-        "🎤 REPEAT WORD",
-        repeat,
-        GREEN,
-        20
-    ).grid(
-        row=0,
-        column=1,
-        padx=8
-    )
+def interview_page():
+    build_speech_page("💼 Interview Practice", "Interview question: " + random.choice(interview_questions), "Interview")
 
-    create_back_button(main)
+# ---------------- GRAMMAR: 5 SETS OF 10 ----------------
+def grammar_page():
+    clear_page()
+    page_heading("📝 Grammar Practice", "Complete 10 questions, submit, then continue to the next set. Total: 50 questions.")
+    quiz_state["page"] = 0
+    quiz_state["score"] = 0
+    quiz_state["selected"] = random.sample(grammar_questions, len(grammar_questions))
+    quiz_state["answers"] = [None] * len(grammar_questions)
+    render_grammar_set()
 
+def render_grammar_set():
+    for widget in root.winfo_children():
+        widget.destroy()
+    page = quiz_state["page"]
+    start_i = page * 10
+    batch = quiz_state["selected"][start_i:start_i+10]
+    page_heading(f"📝 Grammar Quiz — Set {page+1}/5", f"Questions {start_i+1}–{start_i+10} of 50 | Choose one answer for each.")
+    canvas = tk.Canvas(root, bg=BG, highlightthickness=0)
+    scrollbar = ttk.Scrollbar(root, orient="vertical", command=canvas.yview)
+    inner = tk.Frame(canvas, bg=BG)
+    inner.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+    canvas.create_window((0,0), window=inner, anchor="nw")
+    canvas.configure(yscrollcommand=scrollbar.set)
+    canvas.pack(side="left", fill="both", expand=True, padx=(15,0), pady=5)
+    scrollbar.pack(side="right", fill="y", pady=5)
+    vars_ = []
+    for i, (q, opts, correct) in enumerate(batch):
+        frame = tk.Frame(inner, bg=WHITE, padx=12, pady=8)
+        frame.pack(fill="x", padx=10, pady=5)
+        tk.Label(frame, text=f"{start_i+i+1}. {q}", bg=WHITE, fg=NAVY,
+                 font=("Segoe UI", 11, "bold"), wraplength=1000).pack(anchor="w")
+        var = tk.IntVar(value=quiz_state["answers"][start_i+i] if quiz_state["answers"][start_i+i] is not None else -1)
+        vars_.append(var)
+        for j, option in enumerate(opts):
+            tk.Radiobutton(frame, text=option, variable=var, value=j, bg=WHITE,
+                           activebackground=WHITE, activeforeground=PURPLE,
+                           selectcolor="#EAE8FF", fg="#344054",
+                           font=("Segoe UI", 10), cursor="hand2").pack(side="left", padx=10, pady=(6, 0))
+    def submit_set():
+        unanswered = [i for i, v in enumerate(vars_) if v.get() == -1]
+        if unanswered and not messagebox.askyesno("Unanswered", f"{len(unanswered)} question(s) unanswered. Submit this set anyway?"):
+            return
+        correct_now = 0
+        for i, var in enumerate(vars_):
+            global_i = start_i+i
+            quiz_state["answers"][global_i] = var.get()
+            if var.get() == batch[i][2]:
+                correct_now += 1
+        quiz_state["score"] += correct_now
+        if page < 4:
+            messagebox.showinfo("Set result", f"Set {page+1}: {correct_now}/10 correct.\nNext set is ready.")
+            quiz_state["page"] += 1
+            render_grammar_set()
+        else:
+            final_score = round(quiz_state["score"] * 2)
+            grammar_advice = make_improvement_advice("Grammar", final_score,
+                f"You answered {quiz_state['score']} out of 50 questions correctly. Review each incorrect answer in the result summary.")
+            save_progress("Grammar", final_score, grammar_advice)
+            details = [f"Total score: {quiz_state['score']}/50 ({final_score}/100)", ""]
+            for i, item in enumerate(quiz_state["selected"]):
+                q, opts, correct = item
+                given = quiz_state["answers"][i]
+                details.append(f"{i+1}. {q}\nYour answer: {opts[given] if given >= 0 else 'Not answered'} | Correct: {opts[correct]}")
+            show_feedback_page("📊 Grammar Analysis & Feedback", "\n".join(details) +
+                "\n\nTeacher feedback:\n• Revise the rules behind incorrect answers.\n• Practise subject–verb agreement, tenses, articles and prepositions.\n• Review all five sets regularly.", "Grammar", final_score)
+    bottom = tk.Frame(root, bg=BG)
+    bottom.pack(fill="x", pady=7)
+    make_button(bottom, "Submit Set of 10", submit_set, GREEN).pack(side="left", padx=20)
+    make_button(bottom, "← Back to Dashboard", dashboard, NAVY).pack(side="left", padx=5)
 
-# ============================================================
-# PROGRESS PAGE
-# ============================================================
+# ---------------- VOCABULARY ----------------
+def vocabulary_page():
+    clear_page()
+    page_heading("📚 Vocabulary Builder", "Learn one word at a time: think, reveal the meaning, then submit and continue.")
+    vocab_state = {"index": 0, "revealed": False, "correct": 0, "attempts": 0}
+    order = list(vocabulary)
+    random.shuffle(order)
+    card = tk.Frame(root, bg=WHITE, padx=35, pady=24, highlightthickness=1, highlightbackground="#E2E6EF")
+    card.pack(fill="both", expand=True, padx=50, pady=16)
+    counter = tk.Label(card, text="", bg=WHITE, fg=MUTED, font=("Segoe UI", 10, "bold"))
+    counter.pack(pady=(0, 12))
+    word_label = tk.Label(card, text="", bg=WHITE, fg=PURPLE, font=("Segoe UI", 30, "bold"))
+    word_label.pack(pady=12)
+    tk.Label(card, text="Think about the meaning, then enter your guess below.",
+             bg=WHITE, fg=NAVY, font=("Segoe UI", 11)).pack(pady=6)
+    guess = tk.Entry(card, font=("Segoe UI", 12), width=55, relief="solid", bd=1)
+    guess.pack(pady=10, ipady=5)
+    meaning_label = tk.Label(card, text="", bg=WHITE, fg=GREEN, font=("Segoe UI", 12, "bold"),
+                             wraplength=800, justify="center")
+    meaning_label.pack(pady=12)
+    feedback_label = tk.Label(card, text="", bg=WHITE, fg=MUTED, font=("Segoe UI", 10), wraplength=800)
+    feedback_label.pack(pady=5)
+    buttons = tk.Frame(card, bg=WHITE)
+    buttons.pack(pady=14)
+    def render():
+        idx = vocab_state["index"]
+        if idx >= len(order):
+            score = round(vocab_state["correct"] / max(vocab_state["attempts"], 1) * 100)
+            advice = make_improvement_advice("Vocabulary", score,
+                f"Words completed: {vocab_state['attempts']}. Self-rated correct meanings: {vocab_state['correct']}.")
+            save_progress("Vocabulary", score, advice)
+            clear_page()
+            page_heading("Vocabulary Practice Complete", "Review your result and improvement plan.")
+            tk.Label(root, text=f"Completed {len(order)} words\nSelf-rated score: {score}/100\n\n{advice}",
+                     bg=WHITE, fg=NAVY, font=("Segoe UI", 13), padx=30, pady=28,
+                     wraplength=900, justify="left").pack(fill="both", expand=True, padx=40, pady=20)
+            back_button(root)
+            return
+        word, meaning = order[idx]
+        counter.config(text=f"WORD {idx + 1} OF {len(order)}")
+        word_label.config(text=word)
+        guess.delete(0, "end")
+        meaning_label.config(text="")
+        feedback_label.config(text="")
+        vocab_state["revealed"] = False
+        show_btn.config(state="normal")
+        submit_btn.config(state="disabled")
+        guess.focus_set()
+    def show_meaning():
+        word, meaning = order[vocab_state["index"]]
+        meaning_label.config(text=f"Meaning: {meaning}")
+        feedback_label.config(text="Now decide whether your guess was correct, then submit to continue.")
+        vocab_state["revealed"] = True
+        show_btn.config(state="disabled")
+        submit_btn.config(state="normal")
+    def submit_next():
+        if not vocab_state["revealed"]:
+            messagebox.showwarning("Reveal the meaning", "Select Show Meaning before submitting this word.", parent=root)
+            return
+        word, meaning = order[vocab_state["index"]]
+        if not guess.get().strip() and not messagebox.askyesno("No guess entered", "You did not enter a guess. Submit this word anyway?", parent=root):
+            return
+        correct = messagebox.askyesno("Self-check", f"Word: {word}\nMeaning: {meaning}\n\nDid you understand and correctly guess this meaning?", parent=root)
+        vocab_state["attempts"] += 1
+        if correct: vocab_state["correct"] += 1
+        vocab_state["index"] += 1
+        render()
+    show_btn = make_button(buttons, "Show Meaning", show_meaning, ORANGE); show_btn.pack(side="left", padx=6)
+    submit_btn = make_button(buttons, "Submit & Next Word", submit_next, GREEN); submit_btn.pack(side="left", padx=6)
+    make_button(buttons, "← Back to Dashboard", dashboard, NAVY).pack(side="left", padx=6)
+    render()
 
+# ---------------- DAILY QUESTIONS ----------------
+def questions_page():
+    clear_page()
+    page_heading("❓ Daily Communication Questions", "Choose a prompt, set a timer, write or speak your answer, then analyse.")
+    question_var = tk.StringVar(value=random.choice(daily_questions))
+    tk.Label(root, textvariable=question_var, bg=WHITE, fg=NAVY, wraplength=1000,
+             font=("Segoe UI", 13, "bold"), padx=18, pady=12).pack(fill="x", padx=22, pady=7)
+    row = tk.Frame(root, bg=BG); row.pack(pady=4)
+    time_var = tk.StringVar(value="60")
+    ttk.Combobox(row, textvariable=time_var, values=["15","30","45","60","90","120"],
+                 state="readonly", width=8).pack(side="left", padx=5)
+    clock = tk.Label(row, text="Ready", bg=BG, fg=PURPLE, font=("Segoe UI", 11, "bold")); clock.pack(side="left", padx=8)
+    answer = tk.Text(root, height=14, wrap="word", font=("Segoe UI", 11)); answer.pack(fill="both", expand=True, padx=22, pady=8)
+    def new_question():
+        question_var.set(random.choice(daily_questions)); answer.delete("1.0", "end"); stop_timer(); clock.config(text="Ready")
+    def start_timer():
+        stop_timer(); remaining = {"n": int(time_var.get())}
+        def tick():
+            if remaining["n"] <= 0:
+                clock.config(text="Time completed"); active_timer["job"] = None; return
+            clock.config(text=f"{remaining['n']} sec remaining"); remaining["n"] -= 1
+            active_timer["job"] = root.after(1000, tick)
+        tick()
+    def submit():
+        text = answer.get("1.0", "end-1c").strip()
+        if not text:
+            messagebox.showwarning("Answer", "Please type your answer, or use Interview/Speaking Practice for microphone."); return
+        score, feedback, corrected = analyse_text(text, "Daily Questions")
+        save_progress("Daily Questions", score)
+        show_feedback_page("📊 Daily Question Feedback", f"Question: {question_var.get()}\n\nYour answer:\n{text}\n\n{feedback}", "Daily Questions", score, corrected)
+    buttons = tk.Frame(root, bg=BG); buttons.pack(pady=4)
+    make_button(buttons, "Start Timer", start_timer).pack(side="left", padx=4)
+    make_button(buttons, "Next Question", new_question, NAVY).pack(side="left", padx=4)
+    make_button(buttons, "Submit & Analyse", submit, GREEN).pack(side="left", padx=4)
+    make_button(buttons, "Answer with Microphone", lambda: build_speech_page("❓ Daily Question — Voice Answer", question_var.get(), "Daily Questions"), ORANGE).pack(side="left", padx=4)
+    back_button(root)
+
+# ---------------- PRONUNCIATION ----------------
+def pronunciation_page():
+    clear_page()
+    page_heading("🗣 Pronunciation Practice", "Practise one word at a time. Read it aloud, reveal a learning tip, then submit and continue.")
+    state = {"index": 0, "completed": 0}; words = list(pronunciation_words); random.shuffle(words)
+    card = tk.Frame(root, bg=WHITE, padx=35, pady=22, highlightthickness=1, highlightbackground="#E2E6EF")
+    card.pack(fill="both", expand=True, padx=55, pady=16)
+    counter = tk.Label(card, text="", bg=WHITE, fg=MUTED, font=("Segoe UI", 10, "bold")); counter.pack(pady=(0, 10))
+    word_label = tk.Label(card, text="", bg=WHITE, fg=PURPLE, font=("Segoe UI", 30, "bold")); word_label.pack(pady=16)
+    tip = tk.Label(card, text="Read the word slowly. Break it into syllables if it feels difficult.",
+                   bg=WHITE, fg=NAVY, font=("Segoe UI", 11), wraplength=800); tip.pack(pady=8)
+    result = tk.Label(card, text="", bg=WHITE, fg=GREEN, font=("Segoe UI", 11, "bold"), wraplength=800); result.pack(pady=10)
+    row = tk.Frame(card, bg=WHITE); row.pack(pady=16)
+    def render():
+        if state["index"] >= len(words):
+            score = round(state["completed"] / max(len(words), 1) * 100)
+            advice = make_improvement_advice("Pronunciation", score, f"Words marked as practised: {state['completed']} out of {len(words)}.")
+            save_progress("Pronunciation", score, advice); clear_page()
+            page_heading("Pronunciation Practice Complete", "Your practice summary and next steps")
+            tk.Label(root, text=f"Words practised: {state['completed']}/{len(words)}\nPractice completion score: {score}/100\n\n{advice}",
+                     bg=WHITE, fg=NAVY, font=("Segoe UI", 13), padx=30, pady=28, wraplength=900, justify="left").pack(fill="both", expand=True, padx=40, pady=20)
+            back_button(root); return
+        counter.config(text=f"WORD {state['index'] + 1} OF {len(words)}"); word_label.config(text=words[state["index"]])
+        tip.config(text="Read the word slowly. Break it into syllables if it feels difficult. Use the microphone option to compare the recognised word.")
+        result.config(text=""); reveal_btn.config(state="normal"); next_btn.config(state="disabled")
+    def reveal_tip():
+        word = words[state["index"]]
+        tip.config(text=f"Practice tip for '{word}': say it slowly three times, listen to a dictionary pronunciation, notice the stressed syllable, and then use it in a sentence.")
+        result.config(text="After practising, select Submit & Next Word."); reveal_btn.config(state="disabled"); next_btn.config(state="normal")
+    def microphone_practice():
+        word = words[state["index"]]
+        build_speech_page("🗣 Pronunciation — Voice Check", f"Pronounce this word clearly: {word}. The transcript can help you compare the recognised result.", "Pronunciation")
+    def next_word():
+        if not messagebox.askyesno("Submit pronunciation practice", "Have you practised this word aloud? Submit and continue?", parent=root): return
+        state["completed"] += 1; state["index"] += 1; render()
+    reveal_btn = make_button(row, "Show Practice Tip", reveal_tip, ORANGE); reveal_btn.pack(side="left", padx=5)
+    next_btn = make_button(row, "Submit & Next Word", next_word, GREEN); next_btn.pack(side="left", padx=5)
+    make_button(row, "Practise with Microphone", microphone_practice, PURPLE).pack(side="left", padx=5)
+    make_button(row, "← Back to Dashboard", dashboard, NAVY).pack(side="left", padx=5)
+    render()
+
+# ---------------- PROGRESS & GRAPH ----------------
 def progress_page():
-
-    clear_screen()
-
-    main = tk.Frame(
-        root,
-        bg=VERY_LIGHT_BLUE
-    )
-
-    main.pack(
-        fill="both",
-        expand=True
-    )
-
-    # Keep this button pinned to the bottom so it remains easy to find.
-    make_button(
-        main,
-        "← BACK TO DASHBOARD",
-        dashboard,
-        NAVY,
-        25,
-        2
-    ).pack(side="bottom", pady=12)
-
-    page_title(
-        main,
-        "📊 My Progress",
-        "Track your communication improvement"
-    )
-
-    conn = database_connection()
-    cursor = conn.cursor()
-
-    cursor.execute(
-        """
-        SELECT COUNT(*), AVG(score)
-        FROM results
-        WHERE username = ?
-        """,
-        (current_user,)
-    )
-
-    summary = cursor.fetchone()
-
-    cursor.execute(
-        """
-        SELECT module, AVG(score), COUNT(*)
-        FROM results
-        WHERE username = ?
-        GROUP BY module
-        ORDER BY module
-        """,
-        (current_user,)
-    )
-
-    module_data = cursor.fetchall()
-
-    cursor.execute(
-        """
-        SELECT module, score, date
-        FROM results
-        WHERE username = ?
-        ORDER BY id DESC
-        LIMIT 10
-        """,
-        (current_user,)
-    )
-
-    recent_data = cursor.fetchall()
-
-    conn.close()
-
-    total = summary[0] or 0
-
-    average = round(
-        summary[1] or 0,
-        1
-    )
-
-    # ---------------- Summary ----------------
-
-    summary_frame = tk.Frame(
-        main,
-        bg=VERY_LIGHT_BLUE
-    )
-
-    summary_frame.pack(
-        pady=5
-    )
-
-    make_summary_card(
-        summary_frame,
-        "TOTAL PRACTICES",
-        str(total),
-        NAVY
-    ).grid(
-        row=0,
-        column=0,
-        padx=8
-    )
-
-    make_summary_card(
-        summary_frame,
-        "AVERAGE SCORE",
-        f"{average}/100",
-        GREEN
-    ).grid(
-        row=0,
-        column=1,
-        padx=8
-    )
-
-    # ---------------- Module table ----------------
-
-    table_frame = tk.Frame(
-        main,
-        bg=WHITE,
-        padx=15,
-        pady=15,
-        relief="solid",
-        bd=1
-    )
-
-    table_frame.pack(
-        fill="x",
-        padx=80,
-        pady=15
-    )
-
-    tk.Label(
-        table_frame,
-        text="Module Performance",
-        font=("Arial", 15, "bold"),
-        bg=WHITE,
-        fg=NAVY
-    ).pack(
-        pady=5
-    )
-
-    tree = ttk.Treeview(
-        table_frame,
-        columns=(
-            "module",
-            "average",
-            "attempts"
-        ),
-        show="headings",
-        height=7
-    )
-
-    tree.heading(
-        "module",
-        text="Module"
-    )
-
-    tree.heading(
-        "average",
-        text="Average Score"
-    )
-
-    tree.heading(
-        "attempts",
-        text="Attempts"
-    )
-
-    tree.column(
-        "module",
-        width=350
-    )
-
-    tree.column(
-        "average",
-        width=180,
-        anchor="center"
-    )
-
-    tree.column(
-        "attempts",
-        width=150,
-        anchor="center"
-    )
-
-    tree.pack(
-        fill="x"
-    )
-
-    for module, avg, attempts in module_data:
-
-        tree.insert(
-            "",
-            tk.END,
-            values=(
-                module,
-                f"{round(avg, 1)}/100",
-                attempts
-            )
-        )
-
-    if not module_data:
-
-        tk.Label(
-            table_frame,
-            text="Complete your first practice to see your progress.",
-            font=("Arial", 11),
-            bg=WHITE,
-            fg=GREY
-        ).pack(pady=10)
-
-    # ---------------- Recent attempts ----------------
-
-    recent_frame = tk.Frame(
-        main,
-        bg=WHITE,
-        padx=15,
-        pady=10,
-        relief="solid",
-        bd=1
-    )
-
-    recent_frame.pack(
-        fill="x",
-        padx=80,
-        pady=5
-    )
-
-    tk.Label(
-        recent_frame,
-        text="Recent Practice",
-        font=("Arial", 14, "bold"),
-        bg=WHITE,
-        fg=NAVY
-    ).pack(
-        pady=5
-    )
-
-    for module, score, date in recent_data:
-
-        tk.Label(
-            recent_frame,
-            text=f"{date}   |   {module}   |   {score}/100",
-            font=("Arial", 10),
-            bg=WHITE,
-            fg=BLACK
-        ).pack(
-            anchor="w",
-            pady=2
-        )
-
-    # ---------------- Graph ----------------
-
-    if MATPLOTLIB_AVAILABLE and module_data:
-
-        def show_graph():
-
-            modules = [
-                x[0]
-                for x in module_data
-            ]
-
-            scores = [
-                x[1]
-                for x in module_data
-            ]
-
-            plt.figure(
-                figsize=(10, 5)
-            )
-
-            plt.bar(
-                modules,
-                scores,
-                color="#2874A6"
-            )
-
-            plt.title(
-                "Communication Improvement Progress"
-            )
-
-            plt.ylabel(
-                "Average Score"
-            )
-
-            plt.ylim(
-                0,
-                100
-            )
-
-            plt.xticks(
-                rotation=30,
-                ha="right"
-            )
-
-            plt.tight_layout()
-
-            plt.show()
-
-        make_button(
-            main,
-            "📈 VIEW PROGRESS GRAPH",
-            show_graph,
-            BLUE,
-            25
-        ).pack(pady=8)
-
-
-
-# ============================================================
-# LOGOUT
-# ============================================================
-
-def logout():
-
-    global current_user
-
-    current_user = None
-
-    welcome_page()
-
-
-# ============================================================
-# START APPLICATION
-# ============================================================
-
-create_database()
-
-root.title(
-    APP_TITLE
-)
-
-root.geometry(
-    "1200x800"
-)
-
-root.minsize(
-    1000,
-    700
-)
-
-root.protocol(
-    "WM_DELETE_WINDOW",
-    root.destroy
-)
-
+    clear_page()
+    page_heading("📈 Daily Progress & Performance Graph", "Progress is saved separately for each logged-in user.")
+    cur.execute("SELECT activity, score, date, COALESCE(improvement_feedback, '') FROM progress WHERE username=? ORDER BY id DESC LIMIT 100",
+                (current_user["name"],))
+    records = cur.fetchall(); total = len(records)
+    avg = round(sum(r[1] for r in records)/total) if total else 0
+    today = datetime.now().strftime("%Y-%m-%d")
+    today_count = sum(1 for r in records if r[2].startswith(today))
+    summary = tk.Frame(root, bg=BG); summary.pack(pady=5)
+    for label, value in [("Total Practices", total), ("Average Score", f"{avg}/100"), ("Today's Practices", today_count)]:
+        card = tk.Frame(summary, bg=WHITE, padx=20, pady=10); card.pack(side="left", padx=7)
+        tk.Label(card, text=str(value), bg=WHITE, fg=PURPLE, font=("Segoe UI", 17, "bold")).pack()
+        tk.Label(card, text=label, bg=WHITE, fg=MUTED, font=("Segoe UI", 9)).pack()
+    if records:
+        if HAS_MATPLOTLIB:
+            chart_frame = tk.Frame(root, bg=BG); chart_frame.pack(fill="both", expand=True, padx=20, pady=5)
+            chronological = list(reversed(records[:20]))
+            fig = Figure(figsize=(8.5, 3.0), dpi=90); ax = fig.add_subplot(111)
+            scores = [r[1] for r in chronological]; labels = [f"{i+1}" for i in range(len(scores))]
+            ax.plot(labels, scores, marker="o"); ax.set_title("Last practice scores")
+            ax.set_xlabel("Practice (oldest → newest)"); ax.set_ylabel("Score / 100"); ax.set_ylim(0, 105); ax.grid(True, alpha=0.3)
+            fig.tight_layout(); canvas = FigureCanvasTkAgg(fig, master=chart_frame); canvas.draw()
+            canvas.get_tk_widget().pack(fill="both", expand=True)
+        else:
+            tk.Label(root, text="Install matplotlib for a graph: python -m pip install matplotlib", bg=BG, fg=ORANGE).pack(pady=4)
+        table_frame = tk.Frame(root, bg=BG); table_frame.pack(fill="both", expand=True, padx=22, pady=5)
+        tree = ttk.Treeview(table_frame, columns=("Activity","Score","Date","Improvement Feedback"), show="headings", height=7)
+        for col, width in [("Activity",170),("Score",80),("Date",155),("Improvement Feedback",600)]:
+            tree.heading(col, text=col); tree.column(col, width=width, anchor="w")
+        tree.pack(fill="both", expand=True)
+        for activity, score, date, feedback in records:
+            tree.insert("", "end", values=(activity, f"{score}/100", date, feedback))
+    else:
+        tk.Label(root, text="No progress yet. Complete any practice to see your graph and history.", bg=BG, fg=MUTED, font=("Segoe UI", 12)).pack(pady=30)
+    back_button(root)
+
+# ---------------- CLOSE APP ----------------
+def on_close():
+    stop_timer()
+    try:
+        db.commit()
+        db.close()
+    except Exception:
+        pass
+    root.destroy()
+
+root.protocol("WM_DELETE_WINDOW", on_close)
 welcome_page()
-
 root.mainloop()
